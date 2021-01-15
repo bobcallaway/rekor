@@ -5,6 +5,8 @@ info:
   version: 0.0.1
 
 host: api.rekor.dev
+schemes:
+  - https
 
 consumes:
   - application/json
