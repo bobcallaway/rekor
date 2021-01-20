@@ -28,7 +28,6 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag"
 	"github.com/projectrekor/rekor/pkg/generated/models"
 	rekord_v001 "github.com/projectrekor/rekor/pkg/types/rekord/v0.0.1"
@@ -171,56 +170,56 @@ func CreateRekordFromPFlags() (models.ProposedEntry, error) {
 		}
 	} else {
 		// we will need artifact, public-key, signature, and potentially SHA
-		re.RekordObj.Data = &models.RekordV001SchemaData{}
+		re.RekordObj.Data = &models.RekordData{}
 
 		artifact := viper.GetString("artifact")
 		dataURL, err := url.Parse(artifact)
 		if err == nil && dataURL.IsAbs() {
-			re.RekordObj.Data.URL = strfmt.URI(artifact)
-			re.RekordObj.Data.Hash = &models.RekordV001SchemaDataHash{}
-			re.RekordObj.Data.Hash.Algorithm = swag.String("sha256")
+			re.RekordObj.Data.URL = models.RekordURL(artifact)
+			re.RekordObj.Data.Hash = &models.RekordHash{}
+			re.RekordObj.Data.Hash.Algorithm = swag.String(models.RekordHashAlgorithmSha256)
 			re.RekordObj.Data.Hash.Value = swag.String(viper.GetString("sha"))
 		} else {
 			artifactBytes, err := ioutil.ReadFile(filepath.Clean(artifact))
 			if err != nil {
 				return nil, fmt.Errorf("error reading artifact file: %w", err)
 			}
-			re.RekordObj.Data.Content = strfmt.Base64(artifactBytes)
+			re.RekordObj.Data.Content = models.RekordContent(artifactBytes)
 		}
 
 		re.RekordObj.Signature = &models.RekordV001SchemaSignature{}
 		pkiFormat := viper.GetString("pki-format")
 		switch pkiFormat {
 		case "pgp":
-			re.RekordObj.Signature.Format = models.RekordV001SchemaSignatureFormatPgp
+			re.RekordObj.Signature.Format = models.RekordFormatPgp
 		case "minisign":
-			re.RekordObj.Signature.Format = models.RekordV001SchemaSignatureFormatMinisign
+			re.RekordObj.Signature.Format = models.RekordFormatMinisign
 		case "x509":
-			re.RekordObj.Signature.Format = models.RekordV001SchemaSignatureFormatX509
+			re.RekordObj.Signature.Format = models.RekordFormatX509
 		}
 		signature := viper.GetString("signature")
 		sigURL, err := url.Parse(signature)
 		if err == nil && sigURL.IsAbs() {
-			re.RekordObj.Signature.URL = strfmt.URI(signature)
+			re.RekordObj.Signature.URL = models.RekordURL(signature)
 		} else {
 			signatureBytes, err := ioutil.ReadFile(filepath.Clean(signature))
 			if err != nil {
 				return nil, fmt.Errorf("error reading signature file: %w", err)
 			}
-			re.RekordObj.Signature.Content = strfmt.Base64(signatureBytes)
+			re.RekordObj.Signature.Content = models.RekordContent(signatureBytes)
 		}
 
-		re.RekordObj.Signature.PublicKey = &models.RekordV001SchemaSignaturePublicKey{}
+		re.RekordObj.Signature.PublicKey = &models.RekordPublicKey{}
 		publicKey := viper.GetString("public-key")
 		keyURL, err := url.Parse(publicKey)
 		if err == nil && keyURL.IsAbs() {
-			re.RekordObj.Signature.PublicKey.URL = strfmt.URI(publicKey)
+			re.RekordObj.Signature.PublicKey.URL = models.RekordURL(publicKey)
 		} else {
 			keyBytes, err := ioutil.ReadFile(filepath.Clean(publicKey))
 			if err != nil {
 				return nil, fmt.Errorf("error reading public key file: %w", err)
 			}
-			re.RekordObj.Signature.PublicKey.Content = strfmt.Base64(keyBytes)
+			re.RekordObj.Signature.PublicKey.Content = models.RekordContent(keyBytes)
 		}
 
 		if err := re.Validate(); err != nil {

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package rekord
+package rekordpromise
 
 import (
 	"context"
@@ -38,7 +38,7 @@ func TestMain(m *testing.M) {
 
 func TestNewEntryReturnType(t *testing.T) {
 	entry := NewEntry()
-	if reflect.TypeOf(entry) != reflect.ValueOf(&V001Entry{}).Type() {
+	if reflect.TypeOf(entry) != reflect.ValueOf(&V001PromiseEntry{}).Type() {
 		t.Errorf("invalid type returned from NewEntry: %T", entry)
 	}
 }
@@ -46,13 +46,12 @@ func TestNewEntryReturnType(t *testing.T) {
 func TestCrossFieldValidation(t *testing.T) {
 	type TestCase struct {
 		caseDesc                  string
-		entry                     V001Entry
+		entry                     V001PromiseEntry
 		hasExtEntities            bool
 		expectUnmarshalSuccess    bool
 		expectCanonicalizeSuccess bool
 	}
 
-	sigBytes, _ := ioutil.ReadFile("../../../../tests/test_file.sig")
 	keyBytes, _ := ioutil.ReadFile("../../../../tests/test_public_key.key")
 	dataBytes, _ := ioutil.ReadFile("../../../../tests/test_file.txt")
 
@@ -62,12 +61,10 @@ func TestCrossFieldValidation(t *testing.T) {
 
 	testServer := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			file := &sigBytes
+			file := &keyBytes
 			var err error
 
 			switch r.URL.Path {
-			case "/signature":
-				file = &sigBytes
 			case "/key":
 				file = &keyBytes
 			case "/data":
@@ -87,14 +84,14 @@ func TestCrossFieldValidation(t *testing.T) {
 	testCases := []TestCase{
 		{
 			caseDesc:               "empty obj",
-			entry:                  V001Entry{},
+			entry:                  V001PromiseEntry{},
 			expectUnmarshalSuccess: false,
 		},
 		{
 			caseDesc: "signature without url or content",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
 					},
 				},
@@ -103,38 +100,35 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature without public key",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 					},
 				},
 			},
-			hasExtEntities:         true,
+			hasExtEntities:         false,
 			expectUnmarshalSuccess: false,
 		},
 		{
 			caseDesc: "signature with empty public key",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format:    "pgp",
-						URL:       models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{},
 					},
 				},
 			},
-			hasExtEntities:         true,
+			hasExtEntities:         false,
 			expectUnmarshalSuccess: false,
 		},
 		{
 			caseDesc: "signature without data",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{
 							URL: models.RekordURL(testServer.URL + "/key"),
 						},
@@ -146,11 +140,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with empty data",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{
 							URL: models.RekordURL(testServer.URL + "/key"),
 						},
@@ -163,11 +156,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with data & url but no hash",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{
 							URL: models.RekordURL(testServer.URL + "/key"),
 						},
@@ -182,11 +174,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with data & url and empty hash",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{
 							URL: models.RekordURL(testServer.URL + "/key"),
 						},
@@ -202,11 +193,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with data & url and hash missing value",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{
 							URL: models.RekordURL(testServer.URL + "/key"),
 						},
@@ -223,36 +213,11 @@ func TestCrossFieldValidation(t *testing.T) {
 			expectUnmarshalSuccess: false,
 		},
 		{
-			caseDesc: "signature with data & url with 404 error on signature",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
-						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/404"),
-						PublicKey: &models.RekordPublicKey{
-							URL: models.RekordURL(testServer.URL + "/key"),
-						},
-					},
-					Data: &models.RekordData{
-						Hash: &models.RekordHash{
-							Algorithm: swag.String(models.RekordHashAlgorithmSha256),
-							Value:     swag.String(dataSHA),
-						},
-						URL: models.RekordURL(testServer.URL + "/data"),
-					},
-				},
-			},
-			hasExtEntities:            true,
-			expectUnmarshalSuccess:    true,
-			expectCanonicalizeSuccess: false,
-		},
-		{
 			caseDesc: "signature with data & url with 404 error on key",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{
 							URL: models.RekordURL(testServer.URL + "/404"),
 						},
@@ -272,11 +237,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with data & url with 404 error on data",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{
 							URL: models.RekordURL(testServer.URL + "/key"),
 						},
@@ -295,32 +259,11 @@ func TestCrossFieldValidation(t *testing.T) {
 			expectCanonicalizeSuccess: false,
 		},
 		{
-			caseDesc: "signature with invalid sig content, key content & with data with content",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
-						Format:  "pgp",
-						Content: models.RekordContent(dataBytes),
-						PublicKey: &models.RekordPublicKey{
-							Content: models.RekordContent(keyBytes),
-						},
-					},
-					Data: &models.RekordData{
-						Content: models.RekordContent(dataBytes),
-					},
-				},
-			},
-			hasExtEntities:            false,
-			expectUnmarshalSuccess:    true,
-			expectCanonicalizeSuccess: false,
-		},
-		{
 			caseDesc: "signature with sig content, invalid key content & with data with content",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
-						Format:  "pgp",
-						Content: models.RekordContent(sigBytes),
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
+						Format: "pgp",
 						PublicKey: &models.RekordPublicKey{
 							Content: models.RekordContent(dataBytes),
 						},
@@ -336,11 +279,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with sig content, key content & with data with content",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
-						Format:  "pgp",
-						Content: models.RekordContent(sigBytes),
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
+						Format: "pgp",
 						PublicKey: &models.RekordPublicKey{
 							Content: models.RekordContent(dataBytes),
 						},
@@ -356,11 +298,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with data & url and incorrect hash value",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{
 							URL: models.RekordURL(testServer.URL + "/key"),
 						},
@@ -380,11 +321,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with data & url and complete hash value",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{
 							URL: models.RekordURL(testServer.URL + "/key"),
 						},
@@ -404,11 +344,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with sig content, url key & with data with url and complete hash value",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
-						Format:  "pgp",
-						Content: models.RekordContent(sigBytes),
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
+						Format: "pgp",
 						PublicKey: &models.RekordPublicKey{
 							URL: models.RekordURL(testServer.URL + "/key"),
 						},
@@ -428,11 +367,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with sig url, key content & with data with url and complete hash value",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
 						Format: "pgp",
-						URL:    models.RekordURL(testServer.URL + "/signature"),
 						PublicKey: &models.RekordPublicKey{
 							Content: models.RekordContent(keyBytes),
 						},
@@ -452,11 +390,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with sig content, key content & with data with url and complete hash value",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
-						Format:  "pgp",
-						Content: models.RekordContent(sigBytes),
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
+						Format: "pgp",
 						PublicKey: &models.RekordPublicKey{
 							Content: models.RekordContent(keyBytes),
 						},
@@ -476,11 +413,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "signature with sig content, key content & with data with content",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
-						Format:  "pgp",
-						Content: models.RekordContent(sigBytes),
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
+						Format: "pgp",
 						PublicKey: &models.RekordPublicKey{
 							Content: models.RekordContent(keyBytes),
 						},
@@ -496,11 +432,10 @@ func TestCrossFieldValidation(t *testing.T) {
 		},
 		{
 			caseDesc: "valid obj with extradata",
-			entry: V001Entry{
-				RekordObj: models.RekordV001Schema{
-					Signature: &models.RekordV001SchemaSignature{
-						Format:  "pgp",
-						Content: models.RekordContent(sigBytes),
+			entry: V001PromiseEntry{
+				RekordPromiseObj: models.RekordPromiseV001Schema{
+					Signature: &models.RekordPromiseV001SchemaSignature{
+						Format: "pgp",
 						PublicKey: &models.RekordPublicKey{
 							Content: models.RekordContent(keyBytes),
 						},
@@ -522,10 +457,10 @@ func TestCrossFieldValidation(t *testing.T) {
 			t.Errorf("unexpected result in '%v': %v", tc.caseDesc, err)
 		}
 
-		v := &V001Entry{}
-		r := models.Rekord{
+		v := &V001PromiseEntry{}
+		r := models.RekordPromise{
 			APIVersion: swag.String(tc.entry.APIVersion()),
-			Spec:       tc.entry.RekordObj,
+			Spec:       tc.entry.RekordPromiseObj,
 		}
 		if err := v.Unmarshal(&r); (err == nil) != tc.expectUnmarshalSuccess {
 			t.Errorf("unexpected result in '%v': %v", tc.caseDesc, err)

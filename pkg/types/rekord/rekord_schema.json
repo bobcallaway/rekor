@@ -8,5 +8,86 @@
         {
             "$ref": "v0.0.1/rekord_v0_0_1_schema.json"
         }
-    ]
+    ],
+    "definitions": {
+        "rekord_format": {
+            "description": "Specifies the format of the signature and/or public key",
+            "type": "string",
+            "enum": [ "pgp", "minisign", "x509" ]
+        },
+        "rekord_url": {
+            "description": "Specifies the location of an object",
+            "type": "string",
+            "format": "uri"
+        },
+        "rekord_content": {
+            "description": "Specifies the content of an object inline within the document",
+            "type": "string",
+            "format": "byte"
+        },
+        "rekord_publicKey" : {
+            "description": "The public key that can verify the signature",
+            "type": "object",
+            "properties": {
+                "url": {
+                    "$ref": "#/definitions/rekord_url"
+                },
+                "content": {
+                    "$ref": "#/definitions/rekord_content"
+                }
+            },
+            "oneOf": [
+                {
+                    "required": [ "url" ]
+                },
+                {
+                    "required": [ "content" ]
+                }
+            ]
+        },
+        "rekord_hash": {
+            "description": "Specifies the hash algorithm and value for the content",
+            "type": "object",
+            "properties": {
+                "algorithm": {
+                    "description": "The hashing function used to compute the hash value",
+                    "type": "string",
+                    "enum": [ "sha256" ]
+                },
+                "value": {
+                    "description": "The hash value for the content",
+                    "type": "string"
+                }
+            },
+            "required": [ "algorithm", "value" ]
+        },
+        "rekord_data": {
+            "description": "Information about the content associated with the entry",
+            "type": "object",
+            "properties": {
+                "hash": {
+                    "$ref": "#/definitions/rekord_hash"
+                },
+                "url": {
+                    "$ref": "#/definitions/rekord_url"
+                },
+                "content": {
+                    "$ref": "#/definitions/rekord_content"
+                }
+            },
+            "oneOf": [
+                {
+                    "required": [ "hash", "url" ]
+                },
+                {
+                    "required": [ "content" ]
+                }
+            ]
+        },
+        "rekord_extraData": {
+            "description": "Arbitrary content to be included in the verifiable entry in the transparency log", 
+            "type": "object",
+            "additionalProperties": true
+        }
+    }
 }

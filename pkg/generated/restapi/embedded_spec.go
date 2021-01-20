@@ -590,6 +590,32 @@ func init() {
           "additionalProperties": false
         }
       ]
+    },
+    "rekordPromise": {
+      "description": "Rekord Promise object",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/definitions/ProposedEntry"
+        },
+        {
+          "required": [
+            "apiVersion",
+            "spec"
+          ],
+          "properties": {
+            "apiVersion": {
+              "type": "string",
+              "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+            },
+            "spec": {
+              "type": "object",
+              "$ref": "pkg/types/rekordpromise/rekord_promise_schema.json"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     }
   },
   "responses": {
@@ -1161,74 +1187,19 @@ func init() {
       },
       "discriminator": "kind"
     },
-    "RekordV001SchemaData": {
-      "description": "Information about the content associated with the entry",
-      "type": "object",
-      "oneOf": [
-        {
-          "required": [
-            "hash",
-            "url"
-          ]
-        },
-        {
-          "required": [
-            "content"
-          ]
-        }
-      ],
-      "properties": {
-        "content": {
-          "description": "Specifies the content inline within the document",
-          "type": "string",
-          "format": "byte"
-        },
-        "hash": {
-          "description": "Specifies the hash algorithm and value for the content",
-          "type": "object",
-          "required": [
-            "algorithm",
-            "value"
-          ],
-          "properties": {
-            "algorithm": {
-              "description": "The hashing function used to compute the hash value",
-              "type": "string",
-              "enum": [
-                "sha256"
-              ]
-            },
-            "value": {
-              "description": "The hash value for the content",
-              "type": "string"
-            }
-          }
-        },
-        "url": {
-          "description": "Specifies the location of the content; if this is specified, a hash value must also be provided",
-          "type": "string",
-          "format": "uri"
-        }
-      }
-    },
-    "RekordV001SchemaDataHash": {
-      "description": "Specifies the hash algorithm and value for the content",
+    "RekordPromiseV001SchemaSignature": {
+      "description": "Information about the detached signature associated with the entry",
       "type": "object",
       "required": [
-        "algorithm",
-        "value"
+        "format",
+        "publicKey"
       ],
       "properties": {
-        "algorithm": {
-          "description": "The hashing function used to compute the hash value",
-          "type": "string",
-          "enum": [
-            "sha256"
-          ]
+        "format": {
+          "$ref": "#/definitions/rekordFormat"
         },
-        "value": {
-          "description": "The hash value for the content",
-          "type": "string"
+        "publicKey": {
+          "$ref": "#/definitions/rekordPublicKey"
         }
       }
     },
@@ -1253,79 +1224,16 @@ func init() {
       ],
       "properties": {
         "content": {
-          "description": "Specifies the content of the signature inline within the document",
-          "type": "string",
-          "format": "byte"
+          "$ref": "#/definitions/rekordContent"
         },
         "format": {
-          "description": "Specifies the format of the signature",
-          "type": "string",
-          "enum": [
-            "pgp",
-            "minisign",
-            "x509"
-          ]
+          "$ref": "#/definitions/rekordFormat"
         },
         "publicKey": {
-          "description": "The public key that can verify the signature",
-          "type": "object",
-          "oneOf": [
-            {
-              "required": [
-                "url"
-              ]
-            },
-            {
-              "required": [
-                "content"
-              ]
-            }
-          ],
-          "properties": {
-            "content": {
-              "description": "Specifies the content of the public key inline within the document",
-              "type": "string",
-              "format": "byte"
-            },
-            "url": {
-              "description": "Specifies the location of the public key",
-              "type": "string",
-              "format": "uri"
-            }
-          }
+          "$ref": "#/definitions/rekordPublicKey"
         },
         "url": {
-          "description": "Specifies the location of the signature",
-          "type": "string",
-          "format": "uri"
-        }
-      }
-    },
-    "RekordV001SchemaSignaturePublicKey": {
-      "description": "The public key that can verify the signature",
-      "type": "object",
-      "oneOf": [
-        {
-          "required": [
-            "url"
-          ]
-        },
-        {
-          "required": [
-            "content"
-          ]
-        }
-      ],
-      "properties": {
-        "content": {
-          "description": "Specifies the content of the public key inline within the document",
-          "type": "string",
-          "format": "byte"
-        },
-        "url": {
-          "description": "Specifies the location of the public key",
-          "type": "string",
-          "format": "uri"
+          "$ref": "#/definitions/rekordUrl"
         }
       }
     },
@@ -1439,6 +1347,170 @@ func init() {
         }
       ]
     },
+    "rekordContent": {
+      "description": "Specifies the content of an object inline within the document",
+      "type": "string",
+      "format": "byte"
+    },
+    "rekordData": {
+      "description": "Information about the content associated with the entry",
+      "type": "object",
+      "oneOf": [
+        {
+          "required": [
+            "hash",
+            "url"
+          ]
+        },
+        {
+          "required": [
+            "content"
+          ]
+        }
+      ],
+      "properties": {
+        "content": {
+          "$ref": "#/definitions/rekordContent"
+        },
+        "hash": {
+          "$ref": "#/definitions/rekordHash"
+        },
+        "url": {
+          "$ref": "#/definitions/rekordUrl"
+        }
+      }
+    },
+    "rekordExtraData": {
+      "description": "Arbitrary content to be included in the verifiable entry in the transparency log",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "rekordFormat": {
+      "description": "Specifies the format of the signature and/or public key",
+      "type": "string",
+      "enum": [
+        "pgp",
+        "minisign",
+        "x509"
+      ]
+    },
+    "rekordHash": {
+      "description": "Specifies the hash algorithm and value for the content",
+      "type": "object",
+      "required": [
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "description": "The hashing function used to compute the hash value",
+          "type": "string",
+          "enum": [
+            "sha256"
+          ]
+        },
+        "value": {
+          "description": "The hash value for the content",
+          "type": "string"
+        }
+      }
+    },
+    "rekordPromise": {
+      "description": "Rekord Promise object",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/definitions/ProposedEntry"
+        },
+        {
+          "required": [
+            "apiVersion",
+            "spec"
+          ],
+          "properties": {
+            "apiVersion": {
+              "type": "string",
+              "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+            },
+            "spec": {
+              "$ref": "#/definitions/rekordPromiseSchema"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "rekordPromiseSchema": {
+      "description": "Schema for Rekord Promise objects",
+      "type": "object",
+      "title": "Rekor Promise Schema",
+      "oneOf": [
+        {
+          "$ref": "#/definitions/rekordPromiseV001Schema"
+        }
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema",
+      "$id": "http://rekor.dev/types/rekord/rekord_promise_schema.json"
+    },
+    "rekordPromiseV001Schema": {
+      "description": "Schema for Rekord Promise object",
+      "type": "object",
+      "title": "Rekor Promise v0.0.1 Schema",
+      "required": [
+        "signature",
+        "data"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/rekordData"
+        },
+        "extraData": {
+          "$ref": "#/definitions/rekordExtraData"
+        },
+        "signature": {
+          "description": "Information about the detached signature associated with the entry",
+          "type": "object",
+          "required": [
+            "format",
+            "publicKey"
+          ],
+          "properties": {
+            "format": {
+              "$ref": "#/definitions/rekordFormat"
+            },
+            "publicKey": {
+              "$ref": "#/definitions/rekordPublicKey"
+            }
+          }
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema",
+      "$id": "http://rekor.dev/types/rekord/rekord_promise_v0_0_1_schema.json"
+    },
+    "rekordPublicKey": {
+      "description": "The public key that can verify the signature",
+      "type": "object",
+      "oneOf": [
+        {
+          "required": [
+            "url"
+          ]
+        },
+        {
+          "required": [
+            "content"
+          ]
+        }
+      ],
+      "properties": {
+        "content": {
+          "$ref": "#/definitions/rekordContent"
+        },
+        "url": {
+          "$ref": "#/definitions/rekordUrl"
+        }
+      }
+    },
     "rekordSchema": {
       "description": "Schema for Rekord objects",
       "type": "object",
@@ -1448,19 +1520,13 @@ func init() {
           "$ref": "#/definitions/rekordV001Schema"
         }
       ],
-      "$schema": "http://json-schema.org/draft-07/schema",
-      "$id": "http://rekor.dev/types/rekord/rekord_schema.json"
-    },
-    "rekordV001Schema": {
-      "description": "Schema for Rekord object",
-      "type": "object",
-      "title": "Rekor v0.0.1 Schema",
-      "required": [
-        "signature",
-        "data"
-      ],
-      "properties": {
-        "data": {
+      "definitions": {
+        "rekord_content": {
+          "description": "Specifies the content of an object inline within the document",
+          "type": "string",
+          "format": "byte"
+        },
+        "rekord_data": {
           "description": "Information about the content associated with the entry",
           "type": "object",
           "oneOf": [
@@ -1478,42 +1544,103 @@ func init() {
           ],
           "properties": {
             "content": {
-              "description": "Specifies the content inline within the document",
-              "type": "string",
-              "format": "byte"
+              "$ref": "#/definitions/rekordContent"
             },
             "hash": {
-              "description": "Specifies the hash algorithm and value for the content",
-              "type": "object",
-              "required": [
-                "algorithm",
-                "value"
-              ],
-              "properties": {
-                "algorithm": {
-                  "description": "The hashing function used to compute the hash value",
-                  "type": "string",
-                  "enum": [
-                    "sha256"
-                  ]
-                },
-                "value": {
-                  "description": "The hash value for the content",
-                  "type": "string"
-                }
-              }
+              "$ref": "#/definitions/rekordHash"
             },
             "url": {
-              "description": "Specifies the location of the content; if this is specified, a hash value must also be provided",
-              "type": "string",
-              "format": "uri"
+              "$ref": "#/definitions/rekordUrl"
             }
           }
         },
-        "extraData": {
+        "rekord_extraData": {
           "description": "Arbitrary content to be included in the verifiable entry in the transparency log",
           "type": "object",
           "additionalProperties": true
+        },
+        "rekord_format": {
+          "description": "Specifies the format of the signature and/or public key",
+          "type": "string",
+          "enum": [
+            "pgp",
+            "minisign",
+            "x509"
+          ]
+        },
+        "rekord_hash": {
+          "description": "Specifies the hash algorithm and value for the content",
+          "type": "object",
+          "required": [
+            "algorithm",
+            "value"
+          ],
+          "properties": {
+            "algorithm": {
+              "description": "The hashing function used to compute the hash value",
+              "type": "string",
+              "enum": [
+                "sha256"
+              ]
+            },
+            "value": {
+              "description": "The hash value for the content",
+              "type": "string"
+            }
+          }
+        },
+        "rekord_publicKey": {
+          "description": "The public key that can verify the signature",
+          "type": "object",
+          "oneOf": [
+            {
+              "required": [
+                "url"
+              ]
+            },
+            {
+              "required": [
+                "content"
+              ]
+            }
+          ],
+          "properties": {
+            "content": {
+              "$ref": "#/definitions/rekordContent"
+            },
+            "url": {
+              "$ref": "#/definitions/rekordUrl"
+            }
+          }
+        },
+        "rekord_url": {
+          "description": "Specifies the location of an object",
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema",
+      "$id": "http://rekor.dev/types/rekord/rekord_schema.json"
+    },
+    "rekordUrl": {
+      "description": "Specifies the location of an object",
+      "type": "string",
+      "format": "uri"
+    },
+    "rekordV001Schema": {
+      "description": "Schema for Rekord object",
+      "type": "object",
+      "title": "Rekor v0.0.1 Schema",
+      "required": [
+        "signature",
+        "data"
+      ],
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/rekordData"
+        },
+        "extraData": {
+          "$ref": "#/definitions/rekordExtraData"
         },
         "signature": {
           "description": "Information about the detached signature associated with the entry",
@@ -1536,51 +1663,16 @@ func init() {
           ],
           "properties": {
             "content": {
-              "description": "Specifies the content of the signature inline within the document",
-              "type": "string",
-              "format": "byte"
+              "$ref": "#/definitions/rekordContent"
             },
             "format": {
-              "description": "Specifies the format of the signature",
-              "type": "string",
-              "enum": [
-                "pgp",
-                "minisign",
-                "x509"
-              ]
+              "$ref": "#/definitions/rekordFormat"
             },
             "publicKey": {
-              "description": "The public key that can verify the signature",
-              "type": "object",
-              "oneOf": [
-                {
-                  "required": [
-                    "url"
-                  ]
-                },
-                {
-                  "required": [
-                    "content"
-                  ]
-                }
-              ],
-              "properties": {
-                "content": {
-                  "description": "Specifies the content of the public key inline within the document",
-                  "type": "string",
-                  "format": "byte"
-                },
-                "url": {
-                  "description": "Specifies the location of the public key",
-                  "type": "string",
-                  "format": "uri"
-                }
-              }
+              "$ref": "#/definitions/rekordPublicKey"
             },
             "url": {
-              "description": "Specifies the location of the signature",
-              "type": "string",
-              "format": "uri"
+              "$ref": "#/definitions/rekordUrl"
             }
           }
         }

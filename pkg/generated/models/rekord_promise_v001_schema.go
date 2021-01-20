@@ -29,12 +29,12 @@ import (
 	"github.com/go-openapi/validate"
 )
 
-// RekordV001Schema Rekor v0.0.1 Schema
+// RekordPromiseV001Schema Rekor Promise v0.0.1 Schema
 //
-// Schema for Rekord object
+// Schema for Rekord Promise object
 //
-// swagger:model rekordV001Schema
-type RekordV001Schema struct {
+// swagger:model rekordPromiseV001Schema
+type RekordPromiseV001Schema struct {
 
 	// data
 	// Required: true
@@ -45,11 +45,11 @@ type RekordV001Schema struct {
 
 	// signature
 	// Required: true
-	Signature *RekordV001SchemaSignature `json:"signature"`
+	Signature *RekordPromiseV001SchemaSignature `json:"signature"`
 }
 
-// Validate validates this rekord v001 schema
-func (m *RekordV001Schema) Validate(formats strfmt.Registry) error {
+// Validate validates this rekord promise v001 schema
+func (m *RekordPromiseV001Schema) Validate(formats strfmt.Registry) error {
 	var res []error
 
 	if err := m.validateData(formats); err != nil {
@@ -66,7 +66,7 @@ func (m *RekordV001Schema) Validate(formats strfmt.Registry) error {
 	return nil
 }
 
-func (m *RekordV001Schema) validateData(formats strfmt.Registry) error {
+func (m *RekordPromiseV001Schema) validateData(formats strfmt.Registry) error {
 
 	if err := validate.Required("data", "body", m.Data); err != nil {
 		return err
@@ -84,7 +84,7 @@ func (m *RekordV001Schema) validateData(formats strfmt.Registry) error {
 	return nil
 }
 
-func (m *RekordV001Schema) validateSignature(formats strfmt.Registry) error {
+func (m *RekordPromiseV001Schema) validateSignature(formats strfmt.Registry) error {
 
 	if err := validate.Required("signature", "body", m.Signature); err != nil {
 		return err
@@ -103,7 +103,7 @@ func (m *RekordV001Schema) validateSignature(formats strfmt.Registry) error {
 }
 
 // MarshalBinary interface implementation
-func (m *RekordV001Schema) MarshalBinary() ([]byte, error) {
+func (m *RekordPromiseV001Schema) MarshalBinary() ([]byte, error) {
 	if m == nil {
 		return nil, nil
 	}
@@ -111,8 +111,8 @@ func (m *RekordV001Schema) MarshalBinary() ([]byte, error) {
 }
 
 // UnmarshalBinary interface implementation
-func (m *RekordV001Schema) UnmarshalBinary(b []byte) error {
-	var res RekordV001Schema
+func (m *RekordPromiseV001Schema) UnmarshalBinary(b []byte) error {
+	var res RekordPromiseV001Schema
 	if err := swag.ReadJSON(b, &res); err != nil {
 		return err
 	}
@@ -120,33 +120,23 @@ func (m *RekordV001Schema) UnmarshalBinary(b []byte) error {
 	return nil
 }
 
-// RekordV001SchemaSignature Information about the detached signature associated with the entry
+// RekordPromiseV001SchemaSignature Information about the detached signature associated with the entry
 //
-// swagger:model RekordV001SchemaSignature
-type RekordV001SchemaSignature struct {
-
-	// content
-	// Format: byte
-	Content RekordContent `json:"content,omitempty"`
+// swagger:model RekordPromiseV001SchemaSignature
+type RekordPromiseV001SchemaSignature struct {
 
 	// format
-	Format RekordFormat `json:"format,omitempty"`
+	// Required: true
+	Format RekordFormat `json:"format"`
 
 	// public key
-	PublicKey *RekordPublicKey `json:"publicKey,omitempty"`
-
-	// url
-	// Format: uri
-	URL RekordURL `json:"url,omitempty"`
+	// Required: true
+	PublicKey *RekordPublicKey `json:"publicKey"`
 }
 
-// Validate validates this rekord v001 schema signature
-func (m *RekordV001SchemaSignature) Validate(formats strfmt.Registry) error {
+// Validate validates this rekord promise v001 schema signature
+func (m *RekordPromiseV001SchemaSignature) Validate(formats strfmt.Registry) error {
 	var res []error
-
-	if err := m.validateContent(formats); err != nil {
-		res = append(res, err)
-	}
 
 	if err := m.validateFormat(formats); err != nil {
 		res = append(res, err)
@@ -156,37 +146,13 @@ func (m *RekordV001SchemaSignature) Validate(formats strfmt.Registry) error {
 		res = append(res, err)
 	}
 
-	if err := m.validateURL(formats); err != nil {
-		res = append(res, err)
-	}
-
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
 	return nil
 }
 
-func (m *RekordV001SchemaSignature) validateContent(formats strfmt.Registry) error {
-
-	if swag.IsZero(m.Content) { // not required
-		return nil
-	}
-
-	if err := m.Content.Validate(formats); err != nil {
-		if ve, ok := err.(*errors.Validation); ok {
-			return ve.ValidateName("signature" + "." + "content")
-		}
-		return err
-	}
-
-	return nil
-}
-
-func (m *RekordV001SchemaSignature) validateFormat(formats strfmt.Registry) error {
-
-	if swag.IsZero(m.Format) { // not required
-		return nil
-	}
+func (m *RekordPromiseV001SchemaSignature) validateFormat(formats strfmt.Registry) error {
 
 	if err := m.Format.Validate(formats); err != nil {
 		if ve, ok := err.(*errors.Validation); ok {
@@ -198,10 +164,10 @@ func (m *RekordV001SchemaSignature) validateFormat(formats strfmt.Registry) erro
 	return nil
 }
 
-func (m *RekordV001SchemaSignature) validatePublicKey(formats strfmt.Registry) error {
+func (m *RekordPromiseV001SchemaSignature) validatePublicKey(formats strfmt.Registry) error {
 
-	if swag.IsZero(m.PublicKey) { // not required
-		return nil
+	if err := validate.Required("signature"+"."+"publicKey", "body", m.PublicKey); err != nil {
+		return err
 	}
 
 	if m.PublicKey != nil {
@@ -216,24 +182,8 @@ func (m *RekordV001SchemaSignature) validatePublicKey(formats strfmt.Registry) e
 	return nil
 }
 
-func (m *RekordV001SchemaSignature) validateURL(formats strfmt.Registry) error {
-
-	if swag.IsZero(m.URL) { // not required
-		return nil
-	}
-
-	if err := m.URL.Validate(formats); err != nil {
-		if ve, ok := err.(*errors.Validation); ok {
-			return ve.ValidateName("signature" + "." + "url")
-		}
-		return err
-	}
-
-	return nil
-}
-
 // MarshalBinary interface implementation
-func (m *RekordV001SchemaSignature) MarshalBinary() ([]byte, error) {
+func (m *RekordPromiseV001SchemaSignature) MarshalBinary() ([]byte, error) {
 	if m == nil {
 		return nil, nil
 	}
@@ -241,8 +191,8 @@ func (m *RekordV001SchemaSignature) MarshalBinary() ([]byte, error) {
 }
 
 // UnmarshalBinary interface implementation
-func (m *RekordV001SchemaSignature) UnmarshalBinary(b []byte) error {
-	var res RekordV001SchemaSignature
+func (m *RekordPromiseV001SchemaSignature) UnmarshalBinary(b []byte) error {
+	var res RekordPromiseV001SchemaSignature
 	if err := swag.ReadJSON(b, &res); err != nil {
 		return err
 	}
