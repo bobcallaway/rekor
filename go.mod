@@ -14,10 +14,10 @@ require (
 	github.com/ghodss/yaml v1.0.0
 	github.com/go-chi/chi v4.1.2+incompatible
 	github.com/go-openapi/analysis v0.20.1 // indirect
-	github.com/go-openapi/errors v0.20.0
+	github.com/go-openapi/errors v0.20.1
 	github.com/go-openapi/jsonreference v0.19.6 // indirect
 	github.com/go-openapi/loads v0.20.2
-	github.com/go-openapi/runtime v0.19.30
+	github.com/go-openapi/runtime v0.19.31
 	github.com/go-openapi/spec v0.20.3
 	github.com/go-openapi/strfmt v0.20.2
 	github.com/go-openapi/swag v0.19.15
@@ -55,7 +55,7 @@ require (
 	github.com/zalando/go-keyring v0.1.1 // indirect
 	go.mongodb.org/mongo-driver v1.7.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
-	go.uber.org/goleak v1.1.10
+	go.uber.org/goleak v1.1.11
 	go.uber.org/multierr v1.7.0 // indirect
 	go.uber.org/zap v1.19.0
 	gocloud.dev v0.23.0
@@ -67,5 +67,5 @@ require (
 	google.golang.org/genproto v0.0.0-20210729151513-df9385d47c1b
 	google.golang.org/grpc v1.40.0
 	google.golang.org/protobuf v1.27.1
-	gopkg.in/ini.v1 v1.62.0
+	gopkg.in/ini.v1 v1.63.0
 )
