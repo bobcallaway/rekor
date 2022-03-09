@@ -17,8 +17,9 @@
 
 all: rekor-cli rekor-server
 
-GENSRC = pkg/generated/client/%.go pkg/generated/models/%.go pkg/generated/restapi/%.go
+GENSRC = pkg/generated/client/%.go pkg/generated/models/%.go pkg/generated/restapi/%.go pkg/generated/protobuf/%.go
 OPENAPIDEPS = openapi.yaml $(shell find pkg/types -iname "*.json")
+PROTOBUF_DEPS = $(shell find . -iname "*.proto")
 SRCS = $(shell find cmd -iname "*.go") $(shell find pkg -iname "*.go"|grep -v pkg/generated) pkg/generated/restapi/configure_rekor_server.go $(GENSRC)
 TOOLS_DIR := hack/tools
 TOOLS_BIN_DIR := $(abspath $(TOOLS_DIR)/bin)
@@ -62,10 +63,10 @@ CLI_LDFLAGS=$(REKOR_LDFLAGS)
 SERVER_LDFLAGS=$(REKOR_LDFLAGS)
 
 
-$(GENSRC): $(SWAGGER) $(OPENAPIDEPS) $(PROTOC-GEN-GO)
+$(GENSRC): $(SWAGGER) $(OPENAPIDEPS) $(PROTOC-GEN-GO) $(PROTOBUF_DEPS)
 	$(SWAGGER) generate client -f openapi.yaml -q -r COPYRIGHT.txt -t pkg/generated --default-consumes application/json\;q=1 --additional-initialism=TUF
 	$(SWAGGER) generate server -f openapi.yaml -q -r COPYRIGHT.txt -t pkg/generated --exclude-main -A rekor_server --exclude-spec --flag-strategy=pflag --default-produces application/json --additional-initialism=TUF
-	protoc --go_opt=module=github.com/sigstore/rekor --go_out=. rekor_log.proto
+	protoc --plugin=protoc-gen-go=$(TOOLS_BIN_DIR)/protoc-gen-go --go_opt=module=github.com/sigstore/rekor --go_out=. rekor_log.proto
 	# TODO: mark proto files as deps, add validation, custom types
 
 .PHONY: validate-openapi
