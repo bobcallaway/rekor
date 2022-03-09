@@ -50,6 +50,7 @@ GHCR_PREFIX ?= ghcr.io/sigstore/rekor
 
 # Binaries
 SWAGGER := $(TOOLS_BIN_DIR)/swagger
+PROTOC-GEN-GO := $(TOOLS_BIN_DIR)/protoc-gen-go
 GO-FUZZ-BUILD := $(TOOLS_BIN_DIR)/go-fuzz-build
 
 REKOR_LDFLAGS=-X sigs.k8s.io/release-utils/version.gitVersion=$(GIT_VERSION) \
@@ -61,9 +62,11 @@ CLI_LDFLAGS=$(REKOR_LDFLAGS)
 SERVER_LDFLAGS=$(REKOR_LDFLAGS)
 
 
-$(GENSRC): $(SWAGGER) $(OPENAPIDEPS)
+$(GENSRC): $(SWAGGER) $(OPENAPIDEPS) $(PROTOC-GEN-GO)
 	$(SWAGGER) generate client -f openapi.yaml -q -r COPYRIGHT.txt -t pkg/generated --default-consumes application/json\;q=1 --additional-initialism=TUF
 	$(SWAGGER) generate server -f openapi.yaml -q -r COPYRIGHT.txt -t pkg/generated --exclude-main -A rekor_server --exclude-spec --flag-strategy=pflag --default-produces application/json --additional-initialism=TUF
+	protoc --go_opt=module=github.com/sigstore/rekor --go_out=. rekor_log.proto
+	# TODO: mark proto files as deps, add validation, custom types
 
 .PHONY: validate-openapi
 validate-openapi: $(SWAGGER)
@@ -169,6 +172,9 @@ $(GO-FUZZ-BUILD): $(TOOLS_DIR)/go.mod
 
 $(SWAGGER): $(TOOLS_DIR)/go.mod
 	cd $(TOOLS_DIR); go build -trimpath -tags=tools -o $(TOOLS_BIN_DIR)/swagger github.com/go-swagger/go-swagger/cmd/swagger
+
+$(PROTOC-GEN-GO): $(TOOLS_DIR)/go.mod
+	cd $(TOOLS_DIR); go build -trimpath -tags=tools -o $(TOOLS_BIN_DIR)/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
 
 ##################
 # help

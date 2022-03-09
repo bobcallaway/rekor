@@ -26,6 +26,8 @@ import (
 	_ "github.com/dvyukov/go-fuzz/go-fuzz-dep"
 	_ "github.com/go-swagger/go-swagger/cmd/swagger"
 
+	_ "google.golang.org/protobuf/cmd/protoc-gen-go"
+
 	// These are so we can build these two binaries into containers with ko
 	_ "github.com/google/trillian/cmd/trillian_log_server"
 	_ "github.com/google/trillian/cmd/trillian_log_signer"

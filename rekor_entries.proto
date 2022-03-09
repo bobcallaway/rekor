@@ -1,10 +1,12 @@
 syntax = "proto3";
 package dev.sigstore.rekor;
 
+option go_package = "github.com/sigstore/rekor/pkg/generated/protobuf/entries";
+
 service RekorEntries {
     rpc CreateEntry(CreateEntryRequest) returns (EntryResponse);
-    rpc GetEntry(GetEntryRequest) returns (EntryResponse);
-    rpc SearchLog(SearchRequest) returns (SearchLogResponse);
+    //rpc GetEntry(GetEntryRequest) returns (EntryResponse);
+    //rpc SearchLog(SearchRequest) returns (SearchLogResponse);
 }
 
 message ProposedEntry {
@@ -22,7 +24,7 @@ message ProposedEntry {
 }
 
 message CreateEntryRequest {
-    ProposedEntry = 1;
+    ProposedEntry proposedEntry = 1;
 }
 
 message EntryResponse {

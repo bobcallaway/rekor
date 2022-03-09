@@ -1,17 +1,21 @@
 syntax = "proto3";
 package dev.sigstore.rekor;
 
-import "hack/tools/validate.proto";
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/sigstore/rekor/pkg/generated/protobuf/log";
+
+//import "hack/tools/validate.proto";
 
 service RekorLog {
     /**
      * Returns information about the current state of the transparency log
      */
-    rpc LogInfo() returns (LogInfoResponse);
+    rpc LogInfo(google.protobuf.Empty) returns (LogInfoResponse);
     /**
      * Returns the public key that can be used to validate the signed tree head
      */
-    rpc PublicKey() returns (PublicKeyResponse);
+    rpc PublicKey(google.protobuf.Empty) returns (PublicKeyResponse);
     /**
      * Returns information required to generate a consistency proof for the transparency log
      */
@@ -19,7 +23,7 @@ service RekorLog {
     /**
      * Returns the current version information for this Rekor instance
      */
-    rpc Version() returns (VersionResponse);
+    rpc Version(google.protobuf.Empty) returns (VersionResponse);
 }
 
 message LogInfoResponse {
@@ -38,7 +42,7 @@ message ConsistencyProofRequest {
      * The size of the tree that you wish to prove consistency from;
      * (1 means the beginning of the log); defaults to 1 if not specified
      */
-    uint64 firstSize = 1 [(validate.rules).uint64.gte = 1 ];
+    uint64 firstSize = 1;//[(validate.rules).uint64.gte = 1 ];
     uint64 lastSize = 2; // The size of the tree that you wish to prove consistency to
 }
 

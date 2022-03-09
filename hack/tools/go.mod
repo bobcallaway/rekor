@@ -9,4 +9,5 @@ require (
 	github.com/go-swagger/go-swagger v0.29.0
 	github.com/google/trillian v1.4.0
 	github.com/stephens2424/writerset v1.0.2 // indirect
+	google.golang.org/protobuf v1.27.1
 )
