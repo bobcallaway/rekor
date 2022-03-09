@@ -1,0 +1,68 @@
+syntax = "proto3";
+package dev.sigstore.rekor;
+
+service RekorEntries {
+    rpc CreateEntry(CreateEntryRequest) returns (EntryResponse);
+    rpc GetEntry(GetEntryRequest) returns (EntryResponse);
+    rpc SearchLog(SearchRequest) returns (SearchLogResponse);
+}
+
+message ProposedEntry {
+    oneof Type {
+        RekordProposedEntry rekord = 1;
+        HashedRekordProposedEntry hashedRekord = 2;
+        RPMProposedEntry rpm = 3;
+        TUFProposedEntry tuf = 4;
+        AlpineProposedEntry alpine = 5;
+        HelmProposedEntry helm = 6;
+        InTotoProposedEntry inToto = 7;
+        JARProposedEntry jar = 8;
+        RFC3161TimestampProposedEntry rfc3161Timestamp = 9;
+    }
+}
+
+message CreateEntryRequest {
+    ProposedEntry = 1;
+}
+
+message EntryResponse {
+    string uuid = 1;
+    string logID = 2;
+    uint64 logIndex = 3;
+    uint64 integratedTime = 4;
+    bytes attestation = 5;
+    Verification verification = 6;
+    oneof body {
+        RekordEntry rekord = 7;
+        HashedRekordEntry hashedRekord = 8;
+        RPMEntry rpm = 9;
+        TUFEntry tuf = 10;
+        AlpineEntry alpine = 11;
+        HelmEntry helm = 12;
+        InTotoEntry inToto = 13;
+        JAREntry jar = 14;
+        RFC3161TimestampEntry rfc3161Timestamp = 15;
+    }
+}
+
+message Verification {
+    InclusionProof inclusionProof = 1;
+    bytes signedEntryTimestamp = 2;
+}
+
+message InclusionProof {
+    uint64 logIndex = 1;
+    string rootHash = 2;
+    uint64 treeSize = 3;
+    repeated string hashes = 4;
+}
+
+message SearchLogRequest {
+    repeated string uuids = 1;
+    repeated uint64 logIndexes = 2;
+    repeated ProposedEntry entries = 3;
+}
+
+message SearchLogResponse {
+    repeated EntryResponse results = 1;
+}

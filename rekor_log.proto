@@ -1,0 +1,55 @@
+syntax = "proto3";
+package dev.sigstore.rekor;
+
+import "hack/tools/validate.proto";
+
+service RekorLog {
+    /**
+     * Returns information about the current state of the transparency log
+     */
+    rpc LogInfo() returns (LogInfoResponse);
+    /**
+     * Returns the public key that can be used to validate the signed tree head
+     */
+    rpc PublicKey() returns (PublicKeyResponse);
+    /**
+     * Returns information required to generate a consistency proof for the transparency log
+     */
+    rpc ConsistencyProof(ConsistencyProofRequest) returns (ConsistencyProofResponse);
+    /**
+     * Returns the current version information for this Rekor instance
+     */
+    rpc Version() returns (VersionResponse);
+}
+
+message LogInfoResponse {
+    string rootHash = 1; // The current hash value stored at the root of the merkle tree 
+    uint64 treeSize = 2; // The current number of nodes in the merkle tree
+    bytes signedTreeHead = 3; // The current signed tree head
+    uint64 treeID = 4; // The current tree ID
+}
+
+message PublicKeyResponse {
+    bytes publicKey = 1; // The public key that can verify signatures of the tree head
+}
+
+message ConsistencyProofRequest {
+    /**
+     * The size of the tree that you wish to prove consistency from;
+     * (1 means the beginning of the log); defaults to 1 if not specified
+     */
+    uint64 firstSize = 1 [(validate.rules).uint64.gte = 1 ];
+    uint64 lastSize = 2; // The size of the tree that you wish to prove consistency to
+}
+
+message ConsistencyProofResponse {
+    string rootHash = 1; // The hash value stored at the root of the merkle tree at the time the proof was generated
+    repeated string hashes = 2; // The list of hashes required to compute the inclusion proof
+}
+
+message VersionResponse {
+    string version = 1; // The version string for the running instance of Rekor
+    string commit = 2; // The git commit from which the running instance of Rekor was built
+    string treestate = 3; // The state of the git tree when this Rekor instance was built
+    string builddate = 4; // The date which this Rekor instance was compiled
+}
