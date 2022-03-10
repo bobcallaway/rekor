@@ -18,6 +18,8 @@ package dev.sigstore.rekor;
 
 option go_package = "github.com/sigstore/rekor/pkg/generated/protobuf/entries";
 
+import "pkg/types/hashedrekord/hashedrekord_type.proto";
+
 service RekorEntries {
     rpc CreateEntry(CreateEntryRequest) returns (EntryResponse);
     //rpc GetEntry(GetEntryRequest) returns (EntryResponse);
@@ -26,15 +28,15 @@ service RekorEntries {
 
 message ProposedEntry {
     oneof Type {
-        RekordProposedEntry rekord = 1;
-        HashedRekordProposedEntry hashedRekord = 2;
-        RPMProposedEntry rpm = 3;
-        TUFProposedEntry tuf = 4;
-        AlpineProposedEntry alpine = 5;
-        HelmProposedEntry helm = 6;
-        InTotoProposedEntry inToto = 7;
-        JARProposedEntry jar = 8;
-        RFC3161TimestampProposedEntry rfc3161Timestamp = 9;
+//        RekordProposedEntry rekord = 1;
+        dev.sigstore.rekor.types.hashedrekord.ProposedEntry hashedRekord = 1;
+//        RPMProposedEntry rpm = 3;
+//        TUFProposedEntry tuf = 4;
+//        AlpineProposedEntry alpine = 5;
+//        HelmProposedEntry helm = 6;
+//        InTotoProposedEntry inToto = 7;
+//        JARProposedEntry jar = 8;
+//        RFC3161TimestampProposedEntry rfc3161Timestamp = 9;
     }
 }
 
@@ -50,15 +52,15 @@ message EntryResponse {
     bytes attestation = 5;
     Verification verification = 6;
     oneof body {
-        RekordEntry rekord = 7;
-        HashedRekordEntry hashedRekord = 8;
-        RPMEntry rpm = 9;
-        TUFEntry tuf = 10;
-        AlpineEntry alpine = 11;
-        HelmEntry helm = 12;
-        InTotoEntry inToto = 13;
-        JAREntry jar = 14;
-        RFC3161TimestampEntry rfc3161Timestamp = 15;
+//        RekordEntry rekord = 7;
+        dev.sigstore.rekor.types.hashedrekord.Entry hashedRekord = 7;
+//        RPMEntry rpm = 9;
+//        TUFEntry tuf = 10;
+//        AlpineEntry alpine = 11;
+//        HelmEntry helm = 12;
+//        InTotoEntry inToto = 13;
+//        JAREntry jar = 14;
+//        RFC3161TimestampEntry rfc3161Timestamp = 15;
     }
 }
 

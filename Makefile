@@ -17,6 +17,8 @@
 
 all: rekor-cli rekor-server
 
+GO_MODULE=$(shell head -1 go.mod | cut -w -f2)
+
 GENSRC = pkg/generated/client/%.go pkg/generated/models/%.go pkg/generated/restapi/%.go pkg/generated/protobuf/%.go
 OPENAPIDEPS = openapi.yaml $(shell find pkg/types -iname "*.json")
 PROTOBUF_DEPS = $(shell find . -iname "*.proto")
@@ -64,10 +66,10 @@ SERVER_LDFLAGS=$(REKOR_LDFLAGS)
 
 
 $(GENSRC): $(SWAGGER) $(OPENAPIDEPS) $(PROTOC-GEN-GO) $(PROTOBUF_DEPS)
-	$(SWAGGER) generate client -f openapi.yaml -q -r COPYRIGHT.txt -t pkg/generated --default-consumes application/json\;q=1 --additional-initialism=TUF
-	$(SWAGGER) generate server -f openapi.yaml -q -r COPYRIGHT.txt -t pkg/generated --exclude-main -A rekor_server --exclude-spec --flag-strategy=pflag --default-produces application/json --additional-initialism=TUF
-	protoc --plugin=protoc-gen-go=$(TOOLS_BIN_DIR)/protoc-gen-go --go_opt=module=github.com/sigstore/rekor --go_out=. rekor_log.proto
-	# TODO: mark proto files as deps, add validation, custom types
+	# $(SWAGGER) generate client -f openapi.yaml -q -r COPYRIGHT.txt -t pkg/generated --default-consumes application/json\;q=1 --additional-initialism=TUF
+	# $(SWAGGER) generate server -f openapi.yaml -q -r COPYRIGHT.txt -t pkg/generated --exclude-main -A rekor_server --exclude-spec --flag-strategy=pflag --default-produces application/json --additional-initialism=TUF
+	protoc --plugin=protoc-gen-go=$(TOOLS_BIN_DIR)/protoc-gen-go --go_opt=module=$(GO_MODULE) --go_out=. $(PROTOBUF_DEPS)
+	# TODO: add validation, custom types, REST gateway, openapi spec
 
 .PHONY: validate-openapi
 validate-openapi: $(SWAGGER)
@@ -126,7 +128,7 @@ ko:
 	LDFLAGS="$(CLI_LDFLAGS)" GIT_HASH=$(GIT_HASH) GIT_VERSION=$(GIT_VERSION) \
 	ko publish --base-import-paths \
 		--platform=all --tags $(GIT_VERSION) --tags $(GIT_HASH) \
-		github.com/sigstore/rekor/cmd/rekor-cli
+		$(GO_MODULE)/cmd/rekor-cli
 
 deploy:
 	LDFLAGS="$(SERVER_LDFLAGS)" GIT_HASH=$(GIT_HASH) GIT_VERSION=$(GIT_VERSION) ko apply -f config/
@@ -145,12 +147,12 @@ ko-local:
 	LDFLAGS="$(SERVER_LDFLAGS)" GIT_HASH=$(GIT_HASH) GIT_VERSION=$(GIT_VERSION) \
 	ko publish --base-import-paths \
 		--tags $(GIT_VERSION) --tags $(GIT_HASH) --local \
-		github.com/sigstore/rekor/cmd/rekor-server
+		$(GO_MODULE)/cmd/rekor-server
 
 	LDFLAGS="$(CLI_LDFLAGS)" GIT_HASH=$(GIT_HASH) GIT_VERSION=$(GIT_VERSION) \
 	ko publish --base-import-paths \
 		--tags $(GIT_VERSION) --tags $(GIT_HASH) --local \
-		github.com/sigstore/rekor/cmd/rekor-cli
+		$(GO_MODULE)/cmd/rekor-cli
 
 # This builds the trillian containers we rely on using ko for cross platform support
 .PHONY: ko-trillian

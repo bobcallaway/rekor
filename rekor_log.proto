@@ -22,11 +22,11 @@ option go_package = "github.com/sigstore/rekor/pkg/generated/protobuf/log";
 
 //import "hack/tools/validate.proto";
 
-service RekorLog {
+service Log {
     /**
      * Returns information about the current state of the transparency log
      */
-    rpc LogInfo(google.protobuf.Empty) returns (LogInfoResponse);
+    rpc Info(google.protobuf.Empty) returns (LogInfoResponse);
     /**
      * Returns the public key that can be used to validate the signed tree head
      */
