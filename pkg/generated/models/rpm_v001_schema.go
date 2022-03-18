@@ -45,6 +45,9 @@ type RpmV001Schema struct {
 	// public key
 	// Required: true
 	PublicKey *RpmV001SchemaPublicKey `json:"publicKey"`
+
+	// signature
+	Signature *RpmV001SchemaSignature `json:"signature,omitempty"`
 }
 
 // Validate validates this rpm v001 schema
@@ -56,6 +59,10 @@ func (m *RpmV001Schema) Validate(formats strfmt.Registry) error {
 	}
 
 	if err := m.validatePublicKey(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateSignature(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -105,6 +112,25 @@ func (m *RpmV001Schema) validatePublicKey(formats strfmt.Registry) error {
 	return nil
 }
 
+func (m *RpmV001Schema) validateSignature(formats strfmt.Registry) error {
+	if swag.IsZero(m.Signature) { // not required
+		return nil
+	}
+
+	if m.Signature != nil {
+		if err := m.Signature.Validate(formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("signature")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("signature")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
 // ContextValidate validate this rpm v001 schema based on the context it is used
 func (m *RpmV001Schema) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
@@ -114,6 +140,10 @@ func (m *RpmV001Schema) ContextValidate(ctx context.Context, formats strfmt.Regi
 	}
 
 	if err := m.contextValidatePublicKey(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.contextValidateSignature(ctx, formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -147,6 +177,22 @@ func (m *RpmV001Schema) contextValidatePublicKey(ctx context.Context, formats st
 				return ve.ValidateName("publicKey")
 			} else if ce, ok := err.(*errors.CompositeError); ok {
 				return ce.ValidateName("publicKey")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (m *RpmV001Schema) contextValidateSignature(ctx context.Context, formats strfmt.Registry) error {
+
+	if m.Signature != nil {
+		if err := m.Signature.ContextValidate(ctx, formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("signature")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("signature")
 			}
 			return err
 		}
@@ -461,6 +507,63 @@ func (m *RpmV001SchemaPublicKey) MarshalBinary() ([]byte, error) {
 // UnmarshalBinary interface implementation
 func (m *RpmV001SchemaPublicKey) UnmarshalBinary(b []byte) error {
 	var res RpmV001SchemaPublicKey
+	if err := swag.ReadJSON(b, &res); err != nil {
+		return err
+	}
+	*m = res
+	return nil
+}
+
+// RpmV001SchemaSignature The PGP signature extracted from the RPM package
+//
+// swagger:model RpmV001SchemaSignature
+type RpmV001SchemaSignature struct {
+
+	// Specifies the content of the signature inline within the document
+	// Read Only: true
+	// Format: byte
+	Content strfmt.Base64 `json:"content,omitempty"`
+}
+
+// Validate validates this rpm v001 schema signature
+func (m *RpmV001SchemaSignature) Validate(formats strfmt.Registry) error {
+	return nil
+}
+
+// ContextValidate validate this rpm v001 schema signature based on the context it is used
+func (m *RpmV001SchemaSignature) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
+	var res []error
+
+	if err := m.contextValidateContent(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if len(res) > 0 {
+		return errors.CompositeValidationError(res...)
+	}
+	return nil
+}
+
+func (m *RpmV001SchemaSignature) contextValidateContent(ctx context.Context, formats strfmt.Registry) error {
+
+	if err := validate.ReadOnly(ctx, "signature"+"."+"content", "body", strfmt.Base64(m.Content)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// MarshalBinary interface implementation
+func (m *RpmV001SchemaSignature) MarshalBinary() ([]byte, error) {
+	if m == nil {
+		return nil, nil
+	}
+	return swag.WriteJSON(m)
+}
+
+// UnmarshalBinary interface implementation
+func (m *RpmV001SchemaSignature) UnmarshalBinary(b []byte) error {
+	var res RpmV001SchemaSignature
 	if err := swag.ReadJSON(b, &res); err != nil {
 		return err
 	}

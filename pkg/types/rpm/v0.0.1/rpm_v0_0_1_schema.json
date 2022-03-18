@@ -30,6 +30,18 @@
                 }
             ]
         },
+        "signature" : {
+            "description": "The PGP signature extracted from the RPM package",
+            "type": "object",
+            "properties": {
+                "content": {
+                    "description": "Specifies the content of the signature inline within the document",
+                    "type": "string",
+                    "format": "byte",
+                    "readOnly": true
+                }
+            }
+        },
         "package": {
             "description": "Information about the package associated with the entry",
             "type": "object",

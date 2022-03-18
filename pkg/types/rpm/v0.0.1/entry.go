@@ -288,6 +288,9 @@ func (v *V001Entry) Canonicalize(ctx context.Context) ([]byte, error) {
 		canonicalEntry.Package.Headers["RPMSIGTAG_SHA256"] = hex.EncodeToString(sha256sum)
 	}
 
+	canonicalEntry.Signature = &models.RpmV001SchemaSignature{}
+	canonicalEntry.Signature.Content = strfmt.Base64(rpmObj.GPGSignature())
+
 	// wrap in valid object with kind and apiVersion set
 	rpm := models.Rpm{}
 	rpm.APIVersion = swag.String(APIVERSION)
