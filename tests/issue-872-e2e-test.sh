@@ -102,7 +102,7 @@ docker rm $ISSUE800_CONTAINER_ID >/dev/null
 
 V060_UPLOAD_OUTPUT=$REKORTMPDIR/issue-872-upload-output
 echo "* inserting intoto entry into Rekor v0.6.0"
-if ! $ISSUE800_CLI upload --type intoto --artifact tests/intoto_dsse.json --public-key tests/intoto_dsse.pem --format=json --rekor_server=http://localhost:3000 > $V060_UPLOAD_OUTPUT; then
+if ! $ISSUE800_CLI upload --type intoto:0.0.1 --artifact tests/intoto_dsse.json --public-key tests/intoto_dsse.pem --format=json --rekor_server=http://localhost:3000 > $V060_UPLOAD_OUTPUT; then
    echo "* failed to insert intoto entry to test issue #872, exiting"
    docker-compose logs --no-color > /tmp/docker-compose.log
    docker-compose -f $V060_COMPOSE_FILE --project-directory=$PWD logs rekor-server-issue-872-v060 > /tmp/post-insert-docker-compose.log

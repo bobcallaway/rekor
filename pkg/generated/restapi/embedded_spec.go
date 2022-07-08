@@ -1952,6 +1952,141 @@ func init() {
       },
       "readOnly": true
     },
+    "IntotoV002SchemaContent": {
+      "type": "object",
+      "properties": {
+        "envelope": {
+          "description": "envelope",
+          "type": "string",
+          "writeOnly": true
+        },
+        "envelopeHash": {
+          "description": "Specifies the hash algorithm and value encompassing the entire signed envelope",
+          "type": "object",
+          "required": [
+            "algorithm",
+            "value"
+          ],
+          "properties": {
+            "algorithm": {
+              "description": "The hashing function used to compute the hash value",
+              "type": "string",
+              "enum": [
+                "sha256"
+              ]
+            },
+            "value": {
+              "description": "The hash value for the archive",
+              "type": "string"
+            }
+          },
+          "readOnly": true
+        },
+        "payloadHash": {
+          "description": "Specifies the hash algorithm and value covering the payload within the DSSE envelope",
+          "type": "object",
+          "required": [
+            "algorithm",
+            "value"
+          ],
+          "properties": {
+            "algorithm": {
+              "description": "The hashing function used to compute the hash value",
+              "type": "string",
+              "enum": [
+                "sha256"
+              ]
+            },
+            "value": {
+              "description": "The hash value for the envelope's payload",
+              "type": "string"
+            }
+          },
+          "readOnly": true
+        }
+      }
+    },
+    "IntotoV002SchemaContentEnvelopeHash": {
+      "description": "Specifies the hash algorithm and value encompassing the entire signed envelope",
+      "type": "object",
+      "required": [
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "description": "The hashing function used to compute the hash value",
+          "type": "string",
+          "enum": [
+            "sha256"
+          ]
+        },
+        "value": {
+          "description": "The hash value for the archive",
+          "type": "string"
+        }
+      },
+      "readOnly": true
+    },
+    "IntotoV002SchemaContentPayloadHash": {
+      "description": "Specifies the hash algorithm and value covering the payload within the DSSE envelope",
+      "type": "object",
+      "required": [
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "description": "The hashing function used to compute the hash value",
+          "type": "string",
+          "enum": [
+            "sha256"
+          ]
+        },
+        "value": {
+          "description": "The hash value for the envelope's payload",
+          "type": "string"
+        }
+      },
+      "readOnly": true
+    },
+    "IntotoV002SchemaSignature": {
+      "description": "Information about the detached signature associated with the payload",
+      "type": "object",
+      "required": [
+        "publicKey"
+      ],
+      "properties": {
+        "content": {
+          "description": "Specifies the content of the signature over the payload",
+          "type": "string",
+          "format": "byte",
+          "writeOnly": true
+        },
+        "publicKey": {
+          "description": "The public key that can verify the signature",
+          "type": "object",
+          "properties": {
+            "content": {
+              "description": "Specifies the content of the public key inline within the document",
+              "type": "string",
+              "format": "byte"
+            }
+          }
+        }
+      }
+    },
+    "IntotoV002SchemaSignaturePublicKey": {
+      "description": "The public key that can verify the signature",
+      "type": "object",
+      "properties": {
+        "content": {
+          "description": "Specifies the content of the public key inline within the document",
+          "type": "string",
+          "format": "byte"
+        }
+      }
+    },
     "JarV001SchemaArchive": {
       "description": "Information about the archive associated with the entry",
       "type": "object",
@@ -3056,6 +3191,9 @@ func init() {
       "oneOf": [
         {
           "$ref": "#/definitions/intotoV001Schema"
+        },
+        {
+          "$ref": "#/definitions/intotoV002Schema"
         }
       ],
       "$schema": "http://json-schema.org/draft-07/schema",
@@ -3128,6 +3266,99 @@ func init() {
           "description": "The public key that can verify the signature",
           "type": "string",
           "format": "byte"
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema",
+      "$id": "http://rekor.sigstore.dev/types/intoto/intoto_v0_0_1_schema.json"
+    },
+    "intotoV002Schema": {
+      "description": "Schema for intoto object",
+      "type": "object",
+      "title": "intoto v0.0.1 Schema",
+      "required": [
+        "content",
+        "signature"
+      ],
+      "properties": {
+        "content": {
+          "type": "object",
+          "properties": {
+            "envelope": {
+              "description": "envelope",
+              "type": "string",
+              "writeOnly": true
+            },
+            "envelopeHash": {
+              "description": "Specifies the hash algorithm and value encompassing the entire signed envelope",
+              "type": "object",
+              "required": [
+                "algorithm",
+                "value"
+              ],
+              "properties": {
+                "algorithm": {
+                  "description": "The hashing function used to compute the hash value",
+                  "type": "string",
+                  "enum": [
+                    "sha256"
+                  ]
+                },
+                "value": {
+                  "description": "The hash value for the archive",
+                  "type": "string"
+                }
+              },
+              "readOnly": true
+            },
+            "payloadHash": {
+              "description": "Specifies the hash algorithm and value covering the payload within the DSSE envelope",
+              "type": "object",
+              "required": [
+                "algorithm",
+                "value"
+              ],
+              "properties": {
+                "algorithm": {
+                  "description": "The hashing function used to compute the hash value",
+                  "type": "string",
+                  "enum": [
+                    "sha256"
+                  ]
+                },
+                "value": {
+                  "description": "The hash value for the envelope's payload",
+                  "type": "string"
+                }
+              },
+              "readOnly": true
+            }
+          }
+        },
+        "signature": {
+          "description": "Information about the detached signature associated with the payload",
+          "type": "object",
+          "required": [
+            "publicKey"
+          ],
+          "properties": {
+            "content": {
+              "description": "Specifies the content of the signature over the payload",
+              "type": "string",
+              "format": "byte",
+              "writeOnly": true
+            },
+            "publicKey": {
+              "description": "The public key that can verify the signature",
+              "type": "object",
+              "properties": {
+                "content": {
+                  "description": "Specifies the content of the public key inline within the document",
+                  "type": "string",
+                  "format": "byte"
+                }
+              }
+            }
+          }
         }
       },
       "$schema": "http://json-schema.org/draft-07/schema",
