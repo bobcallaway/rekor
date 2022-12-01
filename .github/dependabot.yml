@@ -32,3 +32,24 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+# copies of above target for 'release-1.0' branch
+  - package-ecosystem: "gomod"
+    directory: "/" # Location of package manifests
+    schedule:
+      interval: "daily"
+    target-branch: "release-1.0"
+  - package-ecosystem: "gomod"
+    directory: "./hack/tools"
+    schedule:
+      interval: "daily"
+    target-branch: "release-1.0"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    target-branch: "release-1.0"
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    target-branch: "release-1.0"
