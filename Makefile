@@ -28,21 +28,9 @@ FUZZ_DURATION ?= 10s
 
 PROJECT_ID ?= projectsigstore
 RUNTIME_IMAGE ?= gcr.io/distroless/static
-# Set version variables for LDFLAGS
+# Set version variables for container tags
 GIT_VERSION ?= $(shell git describe --tags --always --dirty)
 GIT_HASH ?= $(shell git rev-parse HEAD)
-DATE_FMT = +%Y-%m-%dT%H:%M:%SZ
-SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct)
-ifdef SOURCE_DATE_EPOCH
-    BUILD_DATE ?= $(shell date -u -d "@$(SOURCE_DATE_EPOCH)" "$(DATE_FMT)" 2>/dev/null || date -u -r "$(SOURCE_DATE_EPOCH)" "$(DATE_FMT)" 2>/dev/null || date -u "$(DATE_FMT)")
-else
-    BUILD_DATE ?= $(shell date "$(DATE_FMT)")
-endif
-GIT_TREESTATE = "clean"
-DIFF = $(shell git diff --quiet >/dev/null 2>&1; if [ $$? -eq 1 ]; then echo "1"; fi)
-ifeq ($(DIFF), 1)
-    GIT_TREESTATE = "dirty"
-endif
 
 KO_PREFIX ?= gcr.io/projectsigstore
 export KO_DOCKER_REPO=$(KO_PREFIX)
@@ -55,10 +43,7 @@ SWAGGER := $(TOOLS_BIN_DIR)/swagger
 GO-FUZZ-BUILD := $(TOOLS_BIN_DIR)/go-fuzz-build
 GOCOVMERGE := $(TOOLS_BIN_DIR)/gocovmerge
 
-REKOR_LDFLAGS=-X sigs.k8s.io/release-utils/version.gitVersion=$(GIT_VERSION) \
-              -X sigs.k8s.io/release-utils/version.gitCommit=$(GIT_HASH) \
-              -X sigs.k8s.io/release-utils/version.gitTreeState=$(GIT_TREESTATE) \
-              -X sigs.k8s.io/release-utils/version.buildDate=$(BUILD_DATE)
+REKOR_LDFLAGS=$(shell ./release/version-ldflags)
 
 CLI_LDFLAGS=$(REKOR_LDFLAGS)
 SERVER_LDFLAGS=$(REKOR_LDFLAGS)

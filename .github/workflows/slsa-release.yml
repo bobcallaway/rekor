@@ -1,0 +1,68 @@
+name: SLSA L3 Release
+
+on:
+  workflow_dispatch:
+
+concurrency: slsa-release
+
+jobs:
+  ldflags:
+    runs-on: ubuntu-latest
+    outputs:
+      ldflags: ${{ steps.ldflags.outputs.value }}
+    steps:
+      - id: checkout
+        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4.1.0
+        with:
+          fetch-depth: 0
+      - id: ldflags
+        run: |
+          echo "value=$(./scripts/version-ldflags)" >> "$GITHUB_OUTPUT"
+
+  rekor-cli-build:
+    needs: ldflags
+    permissions:
+      id-token: write # To sign the provenance.
+      contents: write # To upload assets to release.
+      actions: read # To read the workflow path.
+    strategy:
+      matrix:
+        os: [linux, windows, darwin]
+        arch: [amd64, arm, arm64]
+        include:
+          - os: linux
+            arch: s390x
+          - os: linux
+            arch: ppc64le
+        exclude:
+          - os: windows
+            arch: arm
+          - os: windows
+            arch: arm64
+          - os: darwin
+            arch: amd64
+    # note the uses: line must be pinned by tag due to instructions at
+    # https://github.com/slsa-framework/slsa-github-generator/tree/main/internal/builders/go#referencing-the-slsa-builder
+    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v1.9.0
+    with:
+      go-version-file: go.mod
+      config-file: .slsa-goreleaser/rekor-cli-${{matrix.os}}-${{matrix.arch}}.yml
+      evaluated-envs: "VERSION_LDFLAGS:${{needs.ldflags.outputs.ldflags}}"
+
+  rekor-server-build:
+    needs: ldflags
+    permissions:
+      id-token: write # To sign the provenance.
+      contents: write # To upload assets to release.
+      actions: read # To read the workflow path.
+    strategy:
+      matrix:
+        arch: [amd64, arm, arm64, ppc64le, s390x]
+    # note the uses: line must be pinned by tag due to instructions at
+    # https://github.com/slsa-framework/slsa-github-generator/tree/main/internal/builders/go#referencing-the-slsa-builder
+    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v1.9.0
+    with:
+      go-version-file: go.mod
+      config-file: .slsa-goreleaser/rekor-server-linux-${{matrix.arch}}.yml
+      evaluated-envs: "VERSION_LDFLAGS:${{needs.ldflags.outputs.ldflags}}"
+
