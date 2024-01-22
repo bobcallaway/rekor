@@ -66,7 +66,7 @@ require (
 	github.com/sigstore/protobuf-specs v0.2.1
 	github.com/sigstore/sigstore/pkg/signature/kms/aws v1.8.0
 	github.com/sigstore/sigstore/pkg/signature/kms/azure v1.8.0
-	github.com/sigstore/sigstore/pkg/signature/kms/gcp v1.8.0
+	github.com/sigstore/sigstore/pkg/signature/kms/gcp v1.8.1
 	github.com/sigstore/sigstore/pkg/signature/kms/hashivault v1.8.0
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240102182953-50ed04b92917
