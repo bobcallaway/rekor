@@ -9,11 +9,11 @@ require (
 	github.com/go-chi/chi v4.1.2+incompatible
 	github.com/go-openapi/errors v0.21.1
 	github.com/go-openapi/loads v0.21.6
-	github.com/go-openapi/runtime v0.27.1
+	github.com/go-openapi/runtime v0.27.2
 	github.com/go-openapi/spec v0.20.15
 	github.com/go-openapi/strfmt v0.22.2
 	github.com/go-openapi/swag v0.22.10
-	github.com/go-openapi/validate v0.23.1
+	github.com/go-openapi/validate v0.23.2
 	github.com/google/go-cmp v0.6.0
 	github.com/google/rpmpack v0.6.0
 	github.com/google/trillian v1.6.0
@@ -42,7 +42,7 @@ require (
 	golang.org/x/net v0.21.0
 	golang.org/x/sync v0.6.0
 	google.golang.org/genproto v0.0.0-20240213162025-012b6fc9bca9 // indirect
-	google.golang.org/grpc v1.62.0
+	google.golang.org/grpc v1.62.1
 	google.golang.org/protobuf v1.32.0
 	gopkg.in/ini.v1 v1.67.0
 	sigs.k8s.io/release-utils v0.7.7
