@@ -27,7 +27,7 @@ require (
 	github.com/sassoftware/relic v7.2.1+incompatible
 	github.com/secure-systems-lab/go-securesystemslib v0.8.0
 	github.com/sigstore/sigstore v1.8.4
-	github.com/spf13/cobra v1.8.0
+	github.com/spf13/cobra v1.8.1
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.19.0
 	github.com/theupdateframework/go-tuf v0.7.0
@@ -43,7 +43,7 @@ require (
 	golang.org/x/sync v0.7.0
 	google.golang.org/genproto v0.0.0-20240401170217-c3f982113cda // indirect
 	google.golang.org/grpc v1.64.0
-	google.golang.org/protobuf v1.34.1
+	google.golang.org/protobuf v1.34.2
 	gopkg.in/ini.v1 v1.67.0
 	sigs.k8s.io/release-utils v0.8.2
 	sigs.k8s.io/yaml v1.4.0
@@ -61,7 +61,7 @@ require (
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-retryablehttp v0.7.7
 	github.com/jmoiron/sqlx v1.4.0
-	github.com/redis/go-redis/v9 v9.5.2
+	github.com/redis/go-redis/v9 v9.5.3
 	github.com/sassoftware/relic/v7 v7.6.2
 	github.com/sigstore/protobuf-specs v0.3.2
 	github.com/sigstore/sigstore/pkg/signature/kms/aws v1.8.4
