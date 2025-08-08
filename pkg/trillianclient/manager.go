@@ -195,6 +195,16 @@ func dial(hostname string, port uint16, tlsCACertFile string, useSystemTrustStor
 func (cm *ClientManager) Close() error {
 	var err error
 
+	// Stop client pollers while holding the map lock to ensure complete coverage
+	cm.clientMu.Lock()
+	for _, c := range cm.trillianClients {
+		if c != nil {
+			c.Close()
+		}
+	}
+	cm.clientMu.Unlock()
+
+	// Then close underlying connections
 	cm.connMu.Lock()
 	for cfg, conn := range cm.connections {
 		if closeErr := conn.Close(); closeErr != nil {
