@@ -38,8 +38,8 @@ import (
 
 // Tunable timeouts for initialization and updater polling.
 const (
-	initLatestRootTimeout = 10 * time.Second
-	updaterWaitTimeout    = 2 * time.Second
+	initLatestRootTimeout = 3 * time.Second
+	updaterWaitTimeout    = 3 * time.Second
 )
 
 var (
@@ -151,6 +151,8 @@ type Response struct {
 	GetLatestResult *trillian.GetLatestSignedLogRootResponse
 	// GetConsistencyProofResult contains the response for a consistency proof between two log sizes
 	GetConsistencyProofResult *trillian.GetConsistencyProofResponse
+	// GetLeavesByRangeResult contains the response for fetching leaves without proofs
+	GetLeavesByRangeResult *trillian.GetLeavesByRangeResponse
 	// getProofResult contains the response for an inclusion proof fetched by leaf hash
 	getProofResult *trillian.GetInclusionProofByHashResponse
 }
@@ -342,19 +344,41 @@ func (t *TrillianClient) AddLeaf(ctx context.Context, byteValue []byte) *Respons
 	}
 
 	leafIndex := proofs[0].LeafIndex
-	leafResp := t.GetLeafAndProofByIndex(ctx, leafIndex)
-	if leafResp.Err != nil {
+	// Fetch the leaf without re-requesting a proof (we already have it)
+	leafOnlyResp := t.GetLeafWithoutProof(ctx, leafIndex)
+	if leafOnlyResp.Err != nil {
 		return &Response{
-			Status:       status.Code(leafResp.Err),
-			Err:          leafResp.Err,
+			Status:       status.Code(leafOnlyResp.Err),
+			Err:          leafOnlyResp.Err,
 			GetAddResult: resp,
 		}
 	}
-	resp.QueuedLeaf.Leaf = leafResp.GetLeafAndProofResult.Leaf
+	if leafOnlyResp.GetLeavesByRangeResult == nil || len(leafOnlyResp.GetLeavesByRangeResult.Leaves) == 0 {
+		err := fmt.Errorf("no leaf returned for index %d", leafIndex)
+		return &Response{Status: status.Code(err), Err: err, GetAddResult: resp}
+	}
+	leaf = leafOnlyResp.GetLeavesByRangeResult.Leaves[0]
+
+	// Verify inclusion using the proof we already have against the same root used to fetch it
+	signed := proofResp.getProofResult.SignedLogRoot
+	root, uerr := unmarshalLogRoot(signed.LogRoot)
+	if uerr != nil {
+		return &Response{Status: status.Code(uerr), Err: uerr, GetAddResult: resp}
+	}
+	if err := t.v.VerifyInclusionByHash(&root, leaf.MerkleLeafHash, proofs[0]); err != nil {
+		return &Response{Status: status.Code(err), Err: err, GetAddResult: resp}
+	}
+
+	// Populate the queued leaf and construct a combined response for callers expecting it
+	resp.QueuedLeaf.Leaf = leaf
 	return &Response{
-		Status:                codes.OK,
-		GetAddResult:          resp,
-		GetLeafAndProofResult: leafResp.GetLeafAndProofResult,
+		Status:       codes.OK,
+		GetAddResult: resp,
+		GetLeafAndProofResult: &trillian.GetEntryAndProofResponse{
+			Proof:         proofs[0],
+			Leaf:          leaf,
+			SignedLogRoot: signed,
+		},
 	}
 }
 
@@ -474,6 +498,31 @@ func (t *TrillianClient) GetConsistencyProof(ctx context.Context, firstSize, las
 	}
 }
 
+// GetLeavesByRange fetches leaves from startIndex (inclusive) up to count leaves without proofs.
+func (t *TrillianClient) GetLeavesByRange(ctx context.Context, startIndex, count int64) *Response {
+	if err := t.ensureStarted(ctx); err != nil {
+		return &Response{
+			Status: status.Code(err),
+			Err:    err,
+		}
+	}
+	resp, err := t.client.GetLeavesByRange(ctx, &trillian.GetLeavesByRangeRequest{
+		LogId:      t.logID,
+		StartIndex: startIndex,
+		Count:      count,
+	})
+	return &Response{
+		Status:                 status.Code(err),
+		Err:                    err,
+		GetLeavesByRangeResult: resp,
+	}
+}
+
+// GetLeafWithoutProof is a convenience wrapper for fetching a single leaf by index without proofs.
+func (t *TrillianClient) GetLeafWithoutProof(ctx context.Context, index int64) *Response {
+	return t.GetLeavesByRange(ctx, index, 1)
+}
+
 func (t *TrillianClient) getProofByHashWithRoot(ctx context.Context, hashValue []byte, root types.LogRootV1, signed *trillian.SignedLogRoot) *Response {
 	if root.TreeSize == 0 {
 		return &Response{
@@ -515,12 +564,21 @@ func (t *TrillianClient) getProofByHashWithRoot(ctx context.Context, hashValue [
 	}
 }
 
-// waitForInclusion blocks until inclusion proof is available, waking on updater notifications.
-
-// waitForInclusionWithMinSize behaves like waitForInclusion but ensures the
-// first inclusion-proof attempt happens only after the tree has reached at
-// least minSize. This reduces initial NotFound churn without increasing time
-// to success (since inclusion requires a root advance).
+// waitForInclusionWithMinSize polls for an inclusion proof for a given leaf hash,
+// returning once the proof is available or the context is canceled.
+//
+// It first waits for the tree to reach at least `minSize`. This initial wait
+// prevents an immediate (and likely failing) RPC for leaves that have just been
+// queued, as their inclusion requires at least one subsequent root update.
+//
+// After the initial size is met, it enters a polling loop:
+//  1. Attempt to fetch the inclusion proof against the latest known root.
+//  2. If successful (or if a non-recoverable error occurs), return the result.
+//  3. If the proof is not found (codes.NotFound), wait for the tree to grow by
+//     at least one leaf (i.e., for a new root to be published) and then retry.
+//
+// This strategy efficiently waits for leaf inclusion by synchronizing attempts
+// with observed root updates from the background updater.
 func (t *TrillianClient) waitForInclusionWithMinSize(ctx context.Context, leafHash []byte, minSize uint64) *Response {
 	start := time.Now()
 

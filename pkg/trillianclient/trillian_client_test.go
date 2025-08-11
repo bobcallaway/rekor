@@ -188,11 +188,15 @@ func TestAddLeaf_HappyPath(t *testing.T) {
 		&trillian.GetInclusionProofByHashResponse{Proof: []*trillian.Proof{{LeafIndex: 0, Hashes: [][]byte{sibling}}}}, nil,
 	).Times(1)
 
-	// After inclusion, client fetches leaf by index
-	s.Log.EXPECT().GetEntryAndProof(gomock.Any(), gomock.Any()).Return(&trillian.GetEntryAndProofResponse{
-		Leaf:  &trillian.LogLeaf{MerkleLeafHash: leafHash},
-		Proof: &trillian.Proof{LeafIndex: 0, Hashes: [][]byte{sibling}},
-	}, nil).Times(1)
+	// After inclusion, client fetches the leaf by index without proof
+	s.Log.EXPECT().GetLeavesByRange(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, r *trillian.GetLeavesByRangeRequest) (*trillian.GetLeavesByRangeResponse, error) {
+			if r.StartIndex != 0 || r.Count != 1 {
+				return nil, status.Error(codes.InvalidArgument, "unexpected range request")
+			}
+			return &trillian.GetLeavesByRangeResponse{Leaves: []*trillian.LogLeaf{{MerkleLeafHash: leafHash}}}, nil
+		},
+	).Times(1)
 
 	conn := dialMock(t, s.Addr)
 	tc := newTrillianClient(trillian.NewTrillianLogClient(conn), 21)
