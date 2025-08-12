@@ -57,14 +57,15 @@ func errorMsg(message string, code int) *models.Error {
 	}
 }
 
+var paramsRE = regexp.MustCompile("^(.*)Params$")
+
 func handleRekorAPIError(params interface{}, code int, err error, message string, fields ...interface{}) middleware.Responder {
 	if message == "" {
 		message = http.StatusText(code)
 	}
 
-	re := regexp.MustCompile("^(.*)Params$")
 	typeStr := fmt.Sprintf("%T", params)
-	handler := re.FindStringSubmatch(typeStr)[1]
+	handler := paramsRE.FindStringSubmatch(typeStr)[1]
 
 	logMsg := func(r *http.Request, inputs ...interface{}) {
 		ctx := r.Context()

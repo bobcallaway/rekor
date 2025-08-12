@@ -40,7 +40,6 @@ import (
 	"github.com/go-openapi/swag"
 	"github.com/google/trillian"
 	ttypes "github.com/google/trillian/types"
-	"github.com/spf13/viper"
 	"github.com/transparency-dev/merkle/rfc6962"
 	"google.golang.org/genproto/googleapis/rpc/code"
 	"google.golang.org/grpc/codes"
@@ -90,9 +89,9 @@ func logEntryFromLeaf(ctx context.Context, leaf *trillian.LogLeaf, signedLogRoot
 	if err := root.UnmarshalBinary(signedLogRoot.LogRoot); err != nil {
 		return nil, err
 	}
-	hashes := []string{}
-	for _, hash := range proof.Hashes {
-		hashes = append(hashes, hex.EncodeToString(hash))
+	hashes := make([]string, len(proof.Hashes))
+	for i, hash := range proof.Hashes {
+		hashes[i] = hex.EncodeToString(hash)
 	}
 
 	virtualIndex := sharding.VirtualLogIndex(leaf.GetLeafIndex(), tid, ranges)
@@ -119,7 +118,7 @@ func logEntryFromLeaf(ctx context.Context, leaf *trillian.LogLeaf, signedLogRoot
 	if ok {
 		sc = val
 	} else {
-		scBytes, err := util.CreateAndSignCheckpoint(ctx, viper.GetString("rekor_server.hostname"), tid, root.TreeSize, root.RootHash, logRange.Signer)
+		scBytes, err := util.CreateAndSignCheckpoint(ctx, api.hostname, tid, root.TreeSize, root.RootHash, logRange.Signer)
 		if err != nil {
 			return nil, err
 		}
@@ -135,14 +134,14 @@ func logEntryFromLeaf(ctx context.Context, leaf *trillian.LogLeaf, signedLogRoot
 	}
 
 	uuid := hex.EncodeToString(leaf.MerkleLeafHash)
-	treeID := fmt.Sprintf("%x", tid)
+	treeID := strconv.FormatInt(tid, 16)
 	entryIDstruct, err := sharding.CreateEntryIDFromParts(treeID, uuid)
 	if err != nil {
 		return nil, fmt.Errorf("error creating EntryID from active treeID %v and uuid %v: %w", treeID, uuid, err)
 	}
 	entryID := entryIDstruct.ReturnEntryIDString()
 
-	if viper.GetBool("enable_attestation_storage") {
+	if api.attestationStorageEnabled {
 		pe, err := models.UnmarshalProposedEntry(bytes.NewReader(leaf.LeafValue), runtime.JSONConsumer())
 		if err != nil {
 			return nil, err
@@ -207,10 +206,9 @@ func getArtifactHashValue(entry types.EntryImpl) crypto.Hash {
 		return crypto.SHA256
 	}
 
-	var artifactHashAlgorithm string
-	algoPosition := strings.Index(artifactHash, ":")
-	if algoPosition != -1 {
-		artifactHashAlgorithm = artifactHash[:algoPosition]
+	artifactHashAlgorithm, _, found := strings.Cut(artifactHash, ":")
+	if !found {
+		artifactHashAlgorithm = ""
 	}
 	switch artifactHashAlgorithm {
 	case "sha256":
@@ -349,7 +347,7 @@ func createLogEntry(params entries.CreateLogEntryParams) (models.LogEntry, middl
 		case int32(code.Code_OK):
 		case int32(code.Code_ALREADY_EXISTS), int32(code.Code_FAILED_PRECONDITION):
 			existingUUID := hex.EncodeToString(rfc6962.DefaultHasher.HashLeaf(leaf))
-			activeTree := fmt.Sprintf("%x", api.ActiveTreeID())
+			activeTree := strconv.FormatInt(api.ActiveTreeID(), 16)
 			entryIDstruct, err := sharding.CreateEntryIDFromParts(activeTree, existingUUID)
 			if err != nil {
 				err := fmt.Errorf("error creating EntryID from active treeID %v and uuid %v: %w", activeTree, existingUUID, err)
@@ -370,7 +368,7 @@ func createLogEntry(params entries.CreateLogEntryParams) (models.LogEntry, middl
 	queuedLeaf := resp.GetAddResult.QueuedLeaf.Leaf
 
 	uuid := hex.EncodeToString(queuedLeaf.GetMerkleLeafHash())
-	activeTree := fmt.Sprintf("%x", api.ActiveTreeID())
+	activeTree := strconv.FormatInt(api.ActiveTreeID(), 16)
 	entryIDstruct, err := sharding.CreateEntryIDFromParts(activeTree, uuid)
 	if err != nil {
 		err := fmt.Errorf("error creating EntryID from active treeID %v and uuid %v: %w", activeTree, uuid, err)
@@ -402,18 +400,22 @@ func createLogEntry(params entries.CreateLogEntryParams) (models.LogEntry, middl
 				log.ContextLogger(ctx).Errorf("getting entry index keys: %v", err)
 				return
 			}
-			if err := addToIndex(context.Background(), keys, entryID); err != nil {
+			bgCtx, bgCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer bgCancel()
+			if err := addToIndex(bgCtx, keys, entryID); err != nil {
 				log.ContextLogger(ctx).Errorf("adding keys to index: %v", err)
 			}
 		}()
 	}
 
-	if viper.GetBool("enable_attestation_storage") {
+	if api.attestationStorageEnabled {
 		if entryWithAtt, ok := entry.(types.EntryWithAttestationImpl); ok {
 			attKey, attVal := entryWithAtt.AttestationKeyValue()
 			if attVal != nil {
 				go func() {
-					if err := storeAttestation(context.Background(), attKey, attVal); err != nil {
+					bgCtx, bgCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+					defer bgCancel()
+					if err := storeAttestation(bgCtx, attKey, attVal); err != nil {
 						// entryIDstruct.UUID
 						log.ContextLogger(ctx).Debugf("error storing attestation: %s", err)
 					} else {
@@ -435,12 +437,12 @@ func createLogEntry(params entries.CreateLogEntryParams) (models.LogEntry, middl
 	if err := root.UnmarshalBinary(resp.GetLeafAndProofResult.SignedLogRoot.LogRoot); err != nil {
 		return nil, handleRekorAPIError(params, http.StatusInternalServerError, fmt.Errorf("error unmarshalling log root: %w", err), sthGenerateError)
 	}
-	hashes := []string{}
-	for _, hash := range resp.GetLeafAndProofResult.Proof.Hashes {
-		hashes = append(hashes, hex.EncodeToString(hash))
+	hashes := make([]string, len(resp.GetLeafAndProofResult.Proof.Hashes))
+	for i, hash := range resp.GetLeafAndProofResult.Proof.Hashes {
+		hashes[i] = hex.EncodeToString(hash)
 	}
 
-	scBytes, err := util.CreateAndSignCheckpoint(ctx, viper.GetString("rekor_server.hostname"), api.ActiveTreeID(), root.TreeSize, root.RootHash, api.logRanges.GetActive().Signer)
+	scBytes, err := util.CreateAndSignCheckpoint(ctx, api.hostname, api.ActiveTreeID(), root.TreeSize, root.RootHash, api.logRanges.GetActive().Signer)
 	if err != nil {
 		return nil, handleRekorAPIError(params, http.StatusInternalServerError, err, sthGenerateError)
 	}
@@ -488,10 +490,10 @@ func createLogEntry(params entries.CreateLogEntryParams) (models.LogEntry, middl
 				log.ContextLogger(ctx).Error(err)
 				return
 			}
-			if viper.GetBool("rekor_server.publish_events_protobuf") {
+			if api.publishEventsProtobuf {
 				go publishEvent(ctx, api.newEntryPublisher, event, events.ContentTypeProtobuf)
 			}
-			if viper.GetBool("rekor_server.publish_events_json") {
+			if api.publishEventsJSON {
 				go publishEvent(ctx, api.newEntryPublisher, event, events.ContentTypeJSON)
 			}
 		}()
@@ -621,9 +623,10 @@ func SearchLogQueryHandler(params entries.SearchLogQueryParams) middleware.Respo
 		}
 
 		searchByHashResults := make([]map[int64]*trillian.GetEntryAndProofResponse, len(searchHashes))
+		allShards := api.logRanges.AllShards()
 		for i, hash := range searchHashes {
 			var results map[int64]*trillian.GetEntryAndProofResponse
-			for _, shard := range api.logRanges.AllShards() {
+			for _, shard := range allShards {
 				tc, err := api.trillianClientManager.GetTrillianClient(shard)
 				if err != nil {
 					return handleRekorAPIError(params, http.StatusInternalServerError, err, trillianCommunicationError)

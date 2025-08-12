@@ -49,7 +49,11 @@ type API struct {
 	// Inactive shards will always return the same checkpoint,
 	// so we can fetch the checkpoint on service startup to
 	// minimize signature generations
-	cachedCheckpoints map[int64]string
+	cachedCheckpoints         map[int64]string
+	hostname                  string
+	attestationStorageEnabled bool
+	publishEventsProtobuf     bool
+	publishEventsJSON         bool
 }
 
 func (api *API) ActiveTreeID() int64 {
@@ -173,9 +177,13 @@ func NewAPI(treeID int64) (*API, error) {
 		trillianClientManager: tcm,
 		logRanges:             ranges,
 		// Utility functionality not required for operation of the core service
-		newEntryPublisher: newEntryPublisher,
-		algorithmRegistry: algorithmRegistry,
-		cachedCheckpoints: cachedCheckpoints,
+		newEntryPublisher:         newEntryPublisher,
+		algorithmRegistry:         algorithmRegistry,
+		cachedCheckpoints:         cachedCheckpoints,
+		hostname:                  viper.GetString("rekor_server.hostname"),
+		attestationStorageEnabled: viper.GetBool("enable_attestation_storage"),
+		publishEventsProtobuf:     viper.GetBool("rekor_server.publish_events_protobuf"),
+		publishEventsJSON:         viper.GetBool("rekor_server.publish_events_json"),
 	}, nil
 }
 

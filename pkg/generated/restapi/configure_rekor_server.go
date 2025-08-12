@@ -196,9 +196,9 @@ type httpRequestFields struct {
 func (h *httpRequestFields) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddString("requestMethod", h.requestMethod)
 	enc.AddString("requestUrl", h.requestURL)
-	enc.AddString("requestSize", fmt.Sprintf("%d", h.requestSize))
+	enc.AddString("requestSize", strconv.FormatInt(h.requestSize, 10))
 	enc.AddInt("status", h.status)
-	enc.AddString("responseSize", fmt.Sprintf("%d", h.responseSize))
+	enc.AddString("responseSize", strconv.FormatInt(int64(h.responseSize), 10))
 	enc.AddString("userAgent", h.userAgent)
 	enc.AddString("remoteIp", h.remoteIp)
 	enc.AddString("latency", fmt.Sprintf("%.9fs", h.latency.Seconds())) // formatted per GCP expectations

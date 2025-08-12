@@ -77,7 +77,7 @@ func GetLogInfoHandler(params tlog.GetLogInfoParams) middleware.Responder {
 		RootHash:       &hashString,
 		TreeSize:       &treeSize,
 		SignedTreeHead: stringPointer(string(scBytes)),
-		TreeID:         stringPointer(fmt.Sprintf("%d", api.ActiveTreeID())),
+		TreeID:         stringPointer(strconv.FormatInt(api.ActiveTreeID(), 10)),
 		InactiveShards: inactiveShards,
 	}
 
@@ -125,26 +125,24 @@ func GetLogProofHandler(params tlog.GetLogProofParams) middleware.Responder {
 	}
 
 	hashString := hex.EncodeToString(root.RootHash)
-	proofHashes := []string{}
 
 	if proof := result.GetProof(); proof != nil {
-		for _, hash := range proof.Hashes {
-			proofHashes = append(proofHashes, hex.EncodeToString(hash))
+		proofHashes := make([]string, len(proof.Hashes))
+		for i, hash := range proof.Hashes {
+			proofHashes[i] = hex.EncodeToString(hash)
 		}
-	} else {
-		// The proof field may be empty if the requested tree_size was larger than that available at the server
-		// (e.g. because there is skew between server instances, and an earlier client request was processed by
-		// a more up-to-date instance). root.TreeSize is the maximum size currently observed
-		err := fmt.Errorf(lastSizeGreaterThanKnown, params.LastSize, root.TreeSize)
-		return handleRekorAPIError(params, http.StatusBadRequest, err, err.Error())
-	}
+		consistencyProof := models.ConsistencyProof{
+			RootHash: &hashString,
+			Hashes:   proofHashes,
+		}
 
-	consistencyProof := models.ConsistencyProof{
-		RootHash: &hashString,
-		Hashes:   proofHashes,
+		return tlog.NewGetLogProofOK().WithPayload(&consistencyProof)
 	}
-
-	return tlog.NewGetLogProofOK().WithPayload(&consistencyProof)
+	// The proof field may be empty if the requested tree_size was larger than that available at the server
+	// (e.g. because there is skew between server instances, and an earlier client request was processed by
+	// a more up-to-date instance). root.TreeSize is the maximum size currently observed
+	err = fmt.Errorf(lastSizeGreaterThanKnown, params.LastSize, root.TreeSize)
+	return handleRekorAPIError(params, http.StatusBadRequest, err, err.Error())
 }
 
 func inactiveShardLogInfo(ctx context.Context, tid int64, cachedCheckpoints map[int64]string) (*models.InactiveShardLogInfo, error) {
@@ -169,7 +167,7 @@ func inactiveShardLogInfo(ctx context.Context, tid int64, cachedCheckpoints map[
 	m := models.InactiveShardLogInfo{
 		RootHash:       &hashString,
 		TreeSize:       &treeSize,
-		TreeID:         stringPointer(fmt.Sprintf("%d", tid)),
+		TreeID:         stringPointer(strconv.FormatInt(tid, 10)),
 		SignedTreeHead: stringPointer(cachedCheckpoints[tid]),
 	}
 	return &m, nil

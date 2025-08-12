@@ -240,11 +240,11 @@ func (l *LogRanges) GetActive() LogRange {
 }
 
 func (l *LogRanges) String() string {
-	ranges := []string{}
-	for _, r := range l.inactive {
-		ranges = append(ranges, fmt.Sprintf("%d=%d", r.TreeID, r.TreeLength))
+	ranges := make([]string, len(l.inactive)+1)
+	for i, r := range l.inactive {
+		ranges[i] = fmt.Sprintf("%d=%d", r.TreeID, r.TreeLength)
 	}
-	ranges = append(ranges, fmt.Sprintf("active=%d", l.active.TreeID))
+	ranges[len(ranges)-1] = fmt.Sprintf("active=%d", l.active.TreeID)
 	return strings.Join(ranges, ",")
 }
 

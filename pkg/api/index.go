@@ -148,7 +148,7 @@ func (u Uniq) Add(elements ...string) {
 }
 
 func (u Uniq) Values() []string {
-	var result []string
+	result := make([]string, 0, len(u))
 	for k := range u {
 		result = append(result, k)
 	}
