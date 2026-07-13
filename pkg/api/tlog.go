@@ -26,12 +26,10 @@ import (
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/swag/conv"
 	"github.com/google/trillian/types"
-	"github.com/spf13/viper"
 	"google.golang.org/grpc/codes"
 
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/sigstore/rekor/pkg/generated/restapi/operations/tlog"
-	"github.com/sigstore/rekor/pkg/util"
 )
 
 // GetLogInfoHandler returns the current size of the tree and the STH
@@ -46,7 +44,7 @@ func GetLogInfoHandler(params tlog.GetLogInfoParams) middleware.Responder {
 	var inactiveShards []*models.InactiveShardLogInfo
 	for _, shard := range api.logRanges.GetInactive() {
 		// Get details for this inactive shard
-		is, err := inactiveShardLogInfo(ctx, shard.TreeID, api.cachedCheckpoints)
+		is, err := inactiveShardLogInfo(ctx, shard.TreeID)
 		if err != nil {
 			return handleRekorAPIError(params, http.StatusInternalServerError, fmt.Errorf("inactive shard error: %w", err), unexpectedInactiveShardError)
 		}
@@ -67,8 +65,7 @@ func GetLogInfoHandler(params tlog.GetLogInfoParams) middleware.Responder {
 	hashString := hex.EncodeToString(root.RootHash)
 	treeSize := int64(root.TreeSize) //nolint:gosec
 
-	scBytes, err := util.CreateAndSignCheckpoint(ctx,
-		viper.GetString("rekor_server.hostname"), api.logRanges.GetActive().TreeID, root.TreeSize, root.RootHash, api.logRanges.GetActive().Signer)
+	signedCheckpoint, err := api.getOrSignCheckpoint(ctx, api.logRanges.GetActive().TreeID, root.TreeSize, root.RootHash)
 	if err != nil {
 		return handleRekorAPIError(params, http.StatusInternalServerError, err, sthGenerateError)
 	}
@@ -76,7 +73,7 @@ func GetLogInfoHandler(params tlog.GetLogInfoParams) middleware.Responder {
 	logInfo := models.LogInfo{
 		RootHash:       &hashString,
 		TreeSize:       &treeSize,
-		SignedTreeHead: stringPointer(string(scBytes)),
+		SignedTreeHead: stringPointer(signedCheckpoint),
 		TreeID:         stringPointer(fmt.Sprintf("%d", api.ActiveTreeID())),
 		InactiveShards: inactiveShards,
 	}
@@ -147,7 +144,7 @@ func GetLogProofHandler(params tlog.GetLogProofParams) middleware.Responder {
 	return tlog.NewGetLogProofOK().WithPayload(&consistencyProof)
 }
 
-func inactiveShardLogInfo(ctx context.Context, tid int64, cachedCheckpoints map[int64]string) (*models.InactiveShardLogInfo, error) {
+func inactiveShardLogInfo(ctx context.Context, tid int64) (*models.InactiveShardLogInfo, error) {
 	tc, err := api.trillianClientManager.GetTrillianClient(tid)
 	if err != nil {
 		return nil, fmt.Errorf("getting log client for tree %d: %w", tid, err)
@@ -166,11 +163,16 @@ func inactiveShardLogInfo(ctx context.Context, tid int64, cachedCheckpoints map[
 	hashString := hex.EncodeToString(root.RootHash)
 	treeSize := int64(root.TreeSize) //nolint:gosec
 
+	signedCheckpoint, err := api.getOrSignCheckpoint(ctx, tid, root.TreeSize, root.RootHash)
+	if err != nil {
+		return nil, err
+	}
+
 	m := models.InactiveShardLogInfo{
 		RootHash:       &hashString,
 		TreeSize:       &treeSize,
 		TreeID:         stringPointer(fmt.Sprintf("%d", tid)),
-		SignedTreeHead: stringPointer(cachedCheckpoints[tid]),
+		SignedTreeHead: stringPointer(signedCheckpoint),
 	}
 	return &m, nil
 }

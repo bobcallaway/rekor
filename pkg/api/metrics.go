@@ -68,6 +68,15 @@ var (
 		Help: "Checkpoint publishing by shard and code",
 	}, []string{"shard", "code"})
 
+	// MetricCheckpointSignCache counts checkpoint signing outcomes per shard.
+	// result values: frozen_hit (served from the inactive-shard prewarm),
+	// cache_hit (served from the active-shard LRU), sign (miss that invoked
+	// the signer, incl. when the LRU is disabled).
+	MetricCheckpointSignCache = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "rekor_checkpoint_sign_cache",
+		Help: "Checkpoint signing outcomes by shard and result (frozen_hit, cache_hit, sign)",
+	}, []string{"shard", "result"})
+
 	_ = promauto.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Namespace: "rekor",

@@ -50,6 +50,10 @@ type API struct {
 	// so we can fetch the checkpoint on service startup to
 	// minimize signature generations
 	cachedCheckpoints map[int64]string
+	// Bounded per-pod cache of active-shard checkpoint signatures keyed by
+	// (treeID, size, hash). Cuts redundant KMS calls when many read requests
+	// land on the same tree head.
+	checkpointSignCache *util.SignedCheckpointCache
 }
 
 func (api *API) ActiveTreeID() int64 {
@@ -174,10 +178,34 @@ func NewAPI(treeID int64) (*API, error) {
 		trillianClientManager: tcm,
 		logRanges:             ranges,
 		// Utility functionality not required for operation of the core service
-		newEntryPublisher: newEntryPublisher,
-		algorithmRegistry: algorithmRegistry,
-		cachedCheckpoints: cachedCheckpoints,
+		newEntryPublisher:   newEntryPublisher,
+		algorithmRegistry:   algorithmRegistry,
+		cachedCheckpoints:   cachedCheckpoints,
+		checkpointSignCache: util.NewSignedCheckpointCache(viper.GetString("rekor_server.hostname"), viper.GetUint64("rekor_server.checkpoint_sign_cache_size")),
 	}, nil
+}
+
+// getOrSignCheckpoint returns a signed checkpoint for the given tuple. It is
+// the single entry point for checkpoint lookups outside of startup: it first
+// consults the frozen inactive-shard map (always a hit for inactive shards,
+// prewarmed in NewAPI), then falls through to the bounded active-shard cache,
+// which signs on miss.
+func (api *API) getOrSignCheckpoint(ctx context.Context, treeID int64, size uint64, hash []byte) (string, error) {
+	shard := fmt.Sprintf("%016x", treeID)
+	if cp, ok := api.cachedCheckpoints[treeID]; ok {
+		MetricCheckpointSignCache.WithLabelValues(shard, "frozen_hit").Inc()
+		return cp, nil
+	}
+	logRange, err := api.logRanges.GetLogRangeByTreeID(treeID)
+	if err != nil {
+		return "", err
+	}
+	scBytes, outcome, err := api.checkpointSignCache.GetOrSign(ctx, treeID, size, hash, logRange.Signer)
+	if err != nil {
+		return "", err
+	}
+	MetricCheckpointSignCache.WithLabelValues(shard, string(outcome)).Inc()
+	return string(scBytes), nil
 }
 
 var (

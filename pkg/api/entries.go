@@ -56,7 +56,6 @@ import (
 	"github.com/sigstore/rekor/pkg/tle"
 	"github.com/sigstore/rekor/pkg/types"
 	hashedrekord "github.com/sigstore/rekor/pkg/types/hashedrekord/v0.0.1"
-	"github.com/sigstore/rekor/pkg/util"
 	"github.com/sigstore/sigstore/pkg/signature"
 	"github.com/sigstore/sigstore/pkg/signature/options"
 )
@@ -83,7 +82,7 @@ func signEntry(ctx context.Context, signer signature.Signer, entry models.LogEnt
 
 // logEntryFromLeaf creates a signed LogEntry struct from trillian structs
 func logEntryFromLeaf(ctx context.Context, leaf *trillian.LogLeaf, signedLogRoot *trillian.SignedLogRoot,
-	proof *trillian.Proof, tid int64, ranges *sharding.LogRanges, cachedCheckpoints map[int64]string) (models.LogEntry, error) {
+	proof *trillian.Proof, tid int64, ranges *sharding.LogRanges) (models.LogEntry, error) {
 
 	log.ContextLogger(ctx).Debugf("log entry from leaf %d", leaf.GetLeafIndex())
 	root := &ttypes.LogRootV1{}
@@ -113,17 +112,9 @@ func logEntryFromLeaf(ctx context.Context, leaf *trillian.LogLeaf, signedLogRoot
 		return nil, fmt.Errorf("signing entry error: %w", err)
 	}
 
-	// If tree ID is inactive, use cached checkpoint
-	var sc string
-	val, ok := cachedCheckpoints[tid]
-	if ok {
-		sc = val
-	} else {
-		scBytes, err := util.CreateAndSignCheckpoint(ctx, viper.GetString("rekor_server.hostname"), tid, root.TreeSize, root.RootHash, logRange.Signer)
-		if err != nil {
-			return nil, err
-		}
-		sc = string(scBytes)
+	signedCheckpoint, err := api.getOrSignCheckpoint(ctx, tid, root.TreeSize, root.RootHash)
+	if err != nil {
+		return nil, err
 	}
 
 	inclusionProof := models.InclusionProof{
@@ -131,7 +122,7 @@ func logEntryFromLeaf(ctx context.Context, leaf *trillian.LogLeaf, signedLogRoot
 		RootHash:   conv.Pointer(hex.EncodeToString(root.RootHash)),
 		LogIndex:   conv.Pointer(proof.GetLeafIndex()),
 		Hashes:     hashes,
-		Checkpoint: stringPointer(sc),
+		Checkpoint: stringPointer(signedCheckpoint),
 	}
 
 	uuid := hex.EncodeToString(leaf.MerkleLeafHash)
@@ -440,7 +431,7 @@ func createLogEntry(params entries.CreateLogEntryParams) (models.LogEntry, middl
 		hashes = append(hashes, hex.EncodeToString(hash))
 	}
 
-	scBytes, err := util.CreateAndSignCheckpoint(ctx, viper.GetString("rekor_server.hostname"), api.ActiveTreeID(), root.TreeSize, root.RootHash, api.logRanges.GetActive().Signer)
+	signedCheckpoint, err := api.getOrSignCheckpoint(ctx, api.ActiveTreeID(), root.TreeSize, root.RootHash)
 	if err != nil {
 		return nil, handleRekorAPIError(params, http.StatusInternalServerError, err, sthGenerateError)
 	}
@@ -450,7 +441,7 @@ func createLogEntry(params entries.CreateLogEntryParams) (models.LogEntry, middl
 		RootHash:   conv.Pointer(hex.EncodeToString(root.RootHash)),
 		LogIndex:   conv.Pointer(queuedLeaf.LeafIndex),
 		Hashes:     hashes,
-		Checkpoint: conv.Pointer(string(scBytes)),
+		Checkpoint: conv.Pointer(signedCheckpoint),
 	}
 
 	logEntryAnon.Verification = &models.LogEntryAnonVerification{
@@ -653,7 +644,7 @@ func SearchLogQueryHandler(params entries.SearchLogQueryParams) middleware.Respo
 				if leafResp == nil {
 					continue
 				}
-				logEntry, err := logEntryFromLeaf(httpReqCtx, leafResp.Leaf, leafResp.SignedLogRoot, leafResp.Proof, shard, api.logRanges, api.cachedCheckpoints)
+				logEntry, err := logEntryFromLeaf(httpReqCtx, leafResp.Leaf, leafResp.SignedLogRoot, leafResp.Proof, shard, api.logRanges)
 				if err != nil {
 					return handleRekorAPIError(params, http.StatusInternalServerError, err, trillianUnexpectedResult)
 				}
@@ -701,7 +692,7 @@ func retrieveLogEntryByIndex(ctx context.Context, logIndex int) (models.LogEntry
 		return models.LogEntry{}, ErrNotFound
 	}
 
-	return logEntryFromLeaf(ctx, leaf, result.SignedLogRoot, result.Proof, tid, api.logRanges, api.cachedCheckpoints)
+	return logEntryFromLeaf(ctx, leaf, result.SignedLogRoot, result.Proof, tid, api.logRanges)
 }
 
 // Retrieve a Log Entry
@@ -775,7 +766,7 @@ func retrieveUUIDFromTree(ctx context.Context, uuid string, tid int64) (models.L
 			return models.LogEntry{}, resp.Err
 		}
 
-		logEntry, err := logEntryFromLeaf(ctx, result.Leaf, result.SignedLogRoot, result.Proof, tid, api.logRanges, api.cachedCheckpoints)
+		logEntry, err := logEntryFromLeaf(ctx, result.Leaf, result.SignedLogRoot, result.Proof, tid, api.logRanges)
 		if err != nil {
 			return models.LogEntry{}, fmt.Errorf("could not create log entry from leaf: %w", err)
 		}
