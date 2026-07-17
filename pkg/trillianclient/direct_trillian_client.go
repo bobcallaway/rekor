@@ -329,7 +329,6 @@ func (t *directTrillianClient) getProofByHash(ctx context.Context, hashValue []b
 	}
 }
 
-// GetLeavesByRange fetches leaves from startIndex (inclusive) up to count leaves without proofs.
 func (t *directTrillianClient) GetLeavesByRange(ctx context.Context, startIndex, count int64) *internalclient.Response {
 	resp, err := t.client.GetLeavesByRange(ctx, &trillian.GetLeavesByRangeRequest{
 		LogId:      t.logID,
