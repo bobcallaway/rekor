@@ -37,6 +37,36 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
+// Options bundles all inputs for constructing a ClientManager.
+type Options struct {
+	// DefaultGRPC is the transport config used for any tree not listed in
+	// PerTreeGRPC. Required.
+	DefaultGRPC GRPCConfig
+	// PerTreeGRPC maps specific tree IDs to their own transport config. Trees
+	// absent from this map fall back to DefaultGRPC. Optional; may be nil.
+	PerTreeGRPC map[int64]GRPCConfig
+
+	// CacheSTH enables the cached STH client with a background updater
+	// (experimental). When false, a stateless per-RPC client is used and the
+	// remaining cache-related fields below are ignored.
+	CacheSTH bool
+	// RootRPCTimeout bounds each GetLatestSignedLogRoot RPC issued by a cached
+	// client: initialization and every background updater poll. Zero means
+	// DefaultRootRPCTimeout.
+	RootRPCTimeout time.Duration
+	// PollInterval is the steady cadence at which each cached client's
+	// background updater fetches the latest root. Zero means DefaultPollInterval.
+	PollInterval time.Duration
+	// MaxSTHStaleness is the maximum age of an active cached root before
+	// GetLatest returns Unavailable. Zero derives three poll intervals plus
+	// RootRPCTimeout.
+	MaxSTHStaleness time.Duration
+	// FrozenTreeIDs is the set of tree IDs for frozen (inactive) shards. Cached
+	// clients for these trees fetch the root once and never start a background
+	// updater. Uses the empty-struct set idiom to make membership semantics clear.
+	FrozenTreeIDs map[int64]struct{}
+}
+
 // ClientManager creates and caches Trillian clients and their underlying gRPC connections.
 type ClientManager struct {
 	// Mutex for connections map
@@ -51,29 +81,37 @@ type ClientManager struct {
 	// flag to indicate whether the client manager is shutting down
 	shutdown bool
 
-	// treeIDToConfig maps a specific tree ID to its gRPC configuration.
-	treeIDToConfig map[int64]GRPCConfig
-	// defaultConfig is the global fallback configuration.
-	defaultConfig GRPCConfig
+	// opts is the original construction input. Maps within (PerTreeGRPC,
+	// FrozenTreeIDs) are aliased by reference; callers must not mutate them
+	// after passing Options to NewClientManager.
+	opts Options
+	// cachedCfg is derived once from opts and passed to every cached client
+	// this manager constructs. Ignored when opts.CacheSTH is false.
+	cachedCfg cachedClientConfig
 }
 
-// NewClientManager creates a new ClientManager.
-func NewClientManager(treeIDToConfig map[int64]GRPCConfig, defaultConfig GRPCConfig) *ClientManager {
+// NewClientManager creates a new ClientManager from the given Options.
+func NewClientManager(opts Options) *ClientManager {
 	return &ClientManager{
 		connections:     make(map[GRPCConfig]*grpc.ClientConn),
-		treeIDToConfig:  treeIDToConfig,
-		defaultConfig:   defaultConfig,
 		trillianClients: make(map[int64]internalclient.Client),
+		opts:            opts,
+		cachedCfg: cachedClientConfig{
+			RootRPCTimeout:  opts.RootRPCTimeout,
+			PollInterval:    opts.PollInterval,
+			MaxSTHStaleness: opts.MaxSTHStaleness,
+			FrozenTreeIDs:   opts.FrozenTreeIDs,
+		},
 	}
 }
 
 // getConn finds the correct gRPC config for a tree ID, then dials or retrieves a cached connection.
 func (cm *ClientManager) getConn(treeID int64) (*grpc.ClientConn, error) {
 	// Determine the correct GRPCConfig for this treeID.
-	config, ok := cm.treeIDToConfig[treeID]
+	config, ok := cm.opts.PerTreeGRPC[treeID]
 	if !ok {
 		// If no specific config exists, fall back to the global default.
-		config = cm.defaultConfig
+		config = cm.opts.DefaultGRPC
 	}
 
 	cm.connMu.RLock()
@@ -83,8 +121,28 @@ func (cm *ClientManager) getConn(treeID int64) (*grpc.ClientConn, error) {
 		return conn, nil
 	}
 
+	// Check shutdown before dialing. Read clientMu outside connMu to
+	// maintain consistent lock ordering (GetClient acquires
+	// clientMu then calls getConn which acquires connMu).
+	cm.clientMu.RLock()
+	shutting := cm.shutdown
+	cm.clientMu.RUnlock()
+	if shutting {
+		return nil, errors.New("client manager is shutting down")
+	}
+
 	cm.connMu.Lock()
 	defer cm.connMu.Unlock()
+
+	// Re-check shutdown after acquiring connMu. Close() may have run
+	// between the early check and here, draining all connections.
+	cm.clientMu.RLock()
+	shutting = cm.shutdown
+	cm.clientMu.RUnlock()
+	if shutting {
+		return nil, errors.New("client manager is shutting down")
+	}
+
 	// Double-check after acquiring the write lock.
 	conn, ok = cm.connections[config]
 	if ok {
@@ -100,7 +158,7 @@ func (cm *ClientManager) getConn(treeID int64) (*grpc.ClientConn, error) {
 	return newConn, nil
 }
 
-// GetClient returns a Rekor Trillian client wrapper for the given tree ID.
+// When CacheSTH is enabled, returns a cached STH client; otherwise returns a simple per-RPC client.
 func (cm *ClientManager) GetClient(treeID int64) (internalclient.Client, error) {
 	cm.clientMu.RLock()
 	if cm.shutdown {
@@ -128,7 +186,12 @@ func (cm *ClientManager) GetClient(treeID int64) (internalclient.Client, error) 
 		return c, nil
 	}
 
-	newClient := newDirectTrillianClient(trillian.NewTrillianLogClient(conn), treeID)
+	var newClient internalclient.Client
+	if cm.opts.CacheSTH {
+		newClient = newCachedTrillianClient(trillian.NewTrillianLogClient(conn), treeID, cm.cachedCfg)
+	} else {
+		newClient = newDirectTrillianClient(trillian.NewTrillianLogClient(conn), treeID)
+	}
 	cm.trillianClients[treeID] = newClient
 	return newClient, nil
 }
@@ -224,8 +287,16 @@ func (cm *ClientManager) Close() error {
 	// set shutdown flag to true and clear cache of clients
 	cm.clientMu.Lock()
 	cm.shutdown = true
+	oldClients := cm.trillianClients
 	cm.trillianClients = make(map[int64]internalclient.Client)
 	cm.clientMu.Unlock()
+
+	// Close clients before connections so cached-client updater goroutines exit
+	// cleanly via bgCancel/stopCh rather than seeing connection-closed errors
+	// mid-RPC. Done outside locks since Close may block on wg.Wait().
+	for _, c := range oldClients {
+		c.Close()
+	}
 
 	cm.connMu.Lock()
 	for cfg, conn := range cm.connections {

@@ -27,6 +27,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/sigstore/rekor/pkg/api"
 	"github.com/sigstore/rekor/pkg/log"
+	"github.com/sigstore/rekor/pkg/trillianclient"
 	"github.com/sigstore/rekor/pkg/types"
 	cose "github.com/sigstore/rekor/pkg/types/cose/v0.0.1"
 	intoto001 "github.com/sigstore/rekor/pkg/types/intoto/v0.0.1"
@@ -94,6 +95,10 @@ func init() {
 	rootCmd.PersistentFlags().Uint("trillian_log_server.tlog_id", 0, "Trillian tree id")
 	rootCmd.PersistentFlags().String("trillian_log_server.sharding_config", "", "path to config file for inactive shards, in JSON or YAML")
 	rootCmd.PersistentFlags().String("trillian_log_server.grpc_default_service_config", "", "JSON string used to configure gRPC clients for communicating with Trillian")
+	rootCmd.PersistentFlags().Bool("trillian_log_server.cache_sth", true, "cache signed tree heads and serve them from an in-process background updater instead of fetching a fresh root on every RPC (experimental)")
+	rootCmd.PersistentFlags().Duration("trillian_log_server.root_rpc_timeout", trillianclient.DefaultRootRPCTimeout, "per-RPC timeout applied to every GetLatestSignedLogRoot call (initialization and background updater polls) when cache_sth is enabled; bounds how long a hung Trillian call can stall cache progress")
+	rootCmd.PersistentFlags().Duration("trillian_log_server.sth_poll_interval", trillianclient.DefaultPollInterval, "polling interval at which the background updater fetches the latest tree head when cache_sth is enabled")
+	rootCmd.PersistentFlags().Duration("trillian_log_server.max_sth_staleness", 0, "maximum age of an active cached tree head before log-info requests fail; zero derives three polling intervals plus root_rpc_timeout")
 
 	rootCmd.PersistentFlags().Uint("publish_frequency", 5, "how often to publish a new checkpoint, in minutes")
 

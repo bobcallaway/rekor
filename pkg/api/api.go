@@ -104,12 +104,25 @@ func NewAPI(treeID int64) (*API, error) {
 	}
 
 	inactiveGRPCConfigs := make(map[int64]trillianclient.GRPCConfig)
+	frozenTreeIDs := make(map[int64]struct{})
 	for _, r := range ranges.GetInactive() {
 		if r.GRPCConfig != nil {
 			inactiveGRPCConfigs[r.TreeID] = *r.GRPCConfig
 		}
+		// Inactive shards are frozen: their trees never advance, so the cached
+		// client should fetch the root once and skip the background updater.
+		frozenTreeIDs[r.TreeID] = struct{}{}
 	}
-	tcm := trillianclient.NewClientManager(inactiveGRPCConfigs, defaultGRPCConfig)
+
+	tcm := trillianclient.NewClientManager(trillianclient.Options{
+		DefaultGRPC:     defaultGRPCConfig,
+		PerTreeGRPC:     inactiveGRPCConfigs,
+		CacheSTH:        viper.GetBool("trillian_log_server.cache_sth"),
+		RootRPCTimeout:  viper.GetDuration("trillian_log_server.root_rpc_timeout"),
+		PollInterval:    viper.GetDuration("trillian_log_server.sth_poll_interval"),
+		MaxSTHStaleness: viper.GetDuration("trillian_log_server.max_sth_staleness"),
+		FrozenTreeIDs:   frozenTreeIDs,
+	})
 
 	roots, err := ranges.CompleteInitialization(ctx, tcm)
 	if err != nil {

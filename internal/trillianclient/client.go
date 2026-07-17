@@ -32,9 +32,10 @@ func UnmarshalLogRoot(logRoot []byte) (types.LogRootV1, error) {
 	return root, nil
 }
 
-// Client defines the API for interacting with a Trillian log
-// One implementation exists:
-//   - directTrillianClient: stateless, per-RPC client (default)
+// Client defines the API for interacting with a Trillian log.
+// Its implementations are in pkg/trillianclient:
+//   - directTrillianClient: stateless, per-RPC client
+//   - cachedTrillianClient: cached STH client with a background updater
 type Client interface {
 	AddLeaf(ctx context.Context, byteValue []byte) *Response
 	GetLatest(ctx context.Context) *Response

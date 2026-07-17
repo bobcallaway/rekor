@@ -703,7 +703,7 @@ func TestCompleteInitialization_Scenarios(t *testing.T) {
 					101: {Address: "localhost", Port: uint16(port1)},
 					102: {Address: "localhost", Port: uint16(port2)},
 				}
-				*tcm = trillianclient.NewClientManager(grpcConfigs, trillianclient.GRPCConfig{})
+				*tcm = trillianclient.NewClientManager(trillianclient.Options{PerTreeGRPC: grpcConfigs})
 			},
 			expectErr: false,
 			postCondition: func(t *testing.T, logRanges *LogRanges, roots map[int64]types.LogRootV1) {
@@ -727,8 +727,9 @@ func TestCompleteInitialization_Scenarios(t *testing.T) {
 				s1.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).Return(&trillian.GetLatestSignedLogRootResponse{SignedLogRoot: &trillian.SignedLogRoot{LogRoot: rootBytes}}, nil)
 
 				// No specific config for tree 201, so it should use the default
-				defaultConfig := trillianclient.GRPCConfig{Address: "localhost", Port: uint16(port1)}
-				*tcm = trillianclient.NewClientManager(map[int64]trillianclient.GRPCConfig{}, defaultConfig)
+				*tcm = trillianclient.NewClientManager(trillianclient.Options{
+					DefaultGRPC: trillianclient.GRPCConfig{Address: "localhost", Port: uint16(port1)},
+				})
 			},
 			expectErr: false,
 			postCondition: func(t *testing.T, logRanges *LogRanges, roots map[int64]types.LogRootV1) {
@@ -742,7 +743,9 @@ func TestCompleteInitialization_Scenarios(t *testing.T) {
 			name: "Scenario 3: No Inactive Shards",
 			setup: func(_ *testing.T, logRanges *LogRanges, tcm **trillianclient.ClientManager) {
 				logRanges.inactive = Ranges{}
-				*tcm = trillianclient.NewClientManager(nil, trillianclient.GRPCConfig{Address: "localhost", Port: uint16(port1)})
+				*tcm = trillianclient.NewClientManager(trillianclient.Options{
+					DefaultGRPC: trillianclient.GRPCConfig{Address: "localhost", Port: uint16(port1)},
+				})
 			},
 			expectErr: false,
 			postCondition: func(t *testing.T, logRanges *LogRanges, roots map[int64]types.LogRootV1) {
@@ -760,7 +763,7 @@ func TestCompleteInitialization_Scenarios(t *testing.T) {
 				grpcConfigs := map[int64]trillianclient.GRPCConfig{
 					401: {Address: "localhost", Port: uint16(closedAddr.Port)},
 				}
-				*tcm = trillianclient.NewClientManager(grpcConfigs, trillianclient.GRPCConfig{})
+				*tcm = trillianclient.NewClientManager(trillianclient.Options{PerTreeGRPC: grpcConfigs})
 			},
 			expectErr: true,
 		},
@@ -776,7 +779,7 @@ func TestCompleteInitialization_Scenarios(t *testing.T) {
 				grpcConfigs := map[int64]trillianclient.GRPCConfig{
 					501: {Address: "localhost", Port: uint16(port1)},
 				}
-				*tcm = trillianclient.NewClientManager(grpcConfigs, trillianclient.GRPCConfig{})
+				*tcm = trillianclient.NewClientManager(trillianclient.Options{PerTreeGRPC: grpcConfigs})
 			},
 			expectErr: true,
 		},
