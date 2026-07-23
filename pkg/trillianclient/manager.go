@@ -81,17 +81,32 @@ type ClientManager struct {
 	// flag to indicate whether the client manager is shutting down
 	shutdown bool
 
-	// opts is the original construction input. Maps within (PerTreeGRPC,
-	// FrozenTreeIDs) are aliased by reference; callers must not mutate them
-	// after passing Options to NewClientManager.
+	// opts holds the construction input. Its map fields are shallow-copied
+	// by NewClientManager so the manager owns them independently of the caller.
 	opts Options
 	// cachedCfg is derived once from opts and passed to every cached client
 	// this manager constructs. Ignored when opts.CacheSTH is false.
 	cachedCfg cachedClientConfig
 }
 
-// NewClientManager creates a new ClientManager from the given Options.
+// NewClientManager creates a new ClientManager from the given Options. The
+// map fields on opts (PerTreeGRPC, FrozenTreeIDs) are shallow-copied so
+// subsequent caller mutations are ignored. The shallow copy is safe because
+// both GRPCConfig and struct{} are fully value-typed; if either map's value
+// type ever grows a reference field, this must become a deeper copy.
 func NewClientManager(opts Options) *ClientManager {
+	perTree := make(map[int64]GRPCConfig, len(opts.PerTreeGRPC))
+	for k, v := range opts.PerTreeGRPC {
+		perTree[k] = v
+	}
+	opts.PerTreeGRPC = perTree
+
+	frozen := make(map[int64]struct{}, len(opts.FrozenTreeIDs))
+	for k := range opts.FrozenTreeIDs {
+		frozen[k] = struct{}{}
+	}
+	opts.FrozenTreeIDs = frozen
+
 	return &ClientManager{
 		connections:     make(map[GRPCConfig]*grpc.ClientConn),
 		trillianClients: make(map[int64]internalclient.Client),
