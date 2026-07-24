@@ -80,7 +80,7 @@ var (
 			Help:    "Time to obtain an inclusion proof (ms).",
 			Buckets: prometheus.ExponentialBuckets(1, 2, 12),
 		},
-		[]string{"success"},
+		[]string{"tree", "success"},
 	)
 	metricRootIntegrityAnomaly = promauto.NewCounterVec(
 		prometheus.CounterOpts{
@@ -857,11 +857,7 @@ func (t *cachedTrillianClient) waitForFetchGate(ctx context.Context, gate *fetch
 	start := time.Now()
 	success := false
 	defer func() {
-		result := "false"
-		if success {
-			result = "true"
-		}
-		metricHashReadGateWait.WithLabelValues(t.treeIDStr, result).Observe(float64(time.Since(start).Milliseconds()))
+		metricHashReadGateWait.WithLabelValues(t.treeIDStr, strconv.FormatBool(success)).Observe(float64(time.Since(start).Milliseconds()))
 	}()
 
 	select {
@@ -1072,11 +1068,7 @@ func (t *cachedTrillianClient) waitForInclusionWithMinSize(ctx context.Context, 
 	start := time.Now()
 	success := false
 	defer func() {
-		result := "false"
-		if success {
-			result = "true"
-		}
-		metricInclusionWait.WithLabelValues(result).Observe(float64(time.Since(start).Milliseconds()))
+		metricInclusionWait.WithLabelValues(t.treeIDStr, strconv.FormatBool(success)).Observe(float64(time.Since(start).Milliseconds()))
 	}()
 
 	// Optionally delay the very first attempt until minSize is reached.
