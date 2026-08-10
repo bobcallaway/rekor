@@ -21,10 +21,12 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/trillian"
@@ -51,19 +53,27 @@ type Options struct {
 	// remaining cache-related fields below are ignored.
 	CacheSTH bool
 	// RootRPCTimeout bounds each GetLatestSignedLogRoot RPC issued by a cached
-	// client: initialization and every background updater poll. Zero means
-	// DefaultRootRPCTimeout.
+	// client: initialization, every background updater poll, and every on-demand
+	// refresh. Zero means DefaultRootRPCTimeout.
 	RootRPCTimeout time.Duration
 	// PollInterval is the steady cadence at which each cached client's
-	// background updater fetches the latest root. Zero means DefaultPollInterval.
+	// background updater fetches the latest root, and also the minimum spacing
+	// between on-demand refreshes and between initialization attempts. Zero
+	// means DefaultPollInterval; values below MinPollInterval are clamped.
 	PollInterval time.Duration
-	// MaxSTHStaleness is the maximum age of an active cached root before
-	// GetLatest returns Unavailable. Zero derives three poll intervals plus
-	// RootRPCTimeout.
+	// MaxSTHStaleness is how long an active cached root may go uncorroborated
+	// before reads stop serving it from cache and attempt a synchronous refresh,
+	// returning Unavailable if that does not restore freshness. Zero derives
+	// three poll intervals plus RootRPCTimeout, which is under four seconds at
+	// the defaults — see successfulRootFetchMaxPollIntervals for why the bound
+	// is deliberately tight and what raising it costs.
+	//
+	// The bound applies to every path that serves the cached root or signs a
+	// proof against it: GetLatest, both leaf-and-proof lookups, and AddLeaf.
 	MaxSTHStaleness time.Duration
 	// FrozenTreeIDs is the set of tree IDs for frozen (inactive) shards. Cached
 	// clients for these trees fetch the root once and never start a background
-	// updater. Uses the empty-struct set idiom to make membership semantics clear.
+	// updater.
 	FrozenTreeIDs map[int64]struct{}
 }
 
@@ -78,45 +88,33 @@ type ClientManager struct {
 	clientMu sync.RWMutex
 	// trillianClients caches the client wrappers.
 	trillianClients map[int64]internalclient.Client
-	// flag to indicate whether the client manager is shutting down
-	shutdown bool
+	// shutdown is atomic rather than guarded by clientMu so getConn can check it
+	// while holding connMu without introducing a lock-ordering dependency
+	// between the two mutexes.
+	shutdown atomic.Bool
 
 	// opts holds the construction input. Its map fields are shallow-copied
 	// by NewClientManager so the manager owns them independently of the caller.
 	opts Options
-	// cachedCfg is derived once from opts and passed to every cached client
-	// this manager constructs. Ignored when opts.CacheSTH is false.
-	cachedCfg cachedClientConfig
 }
 
-// NewClientManager creates a new ClientManager from the given Options. The
-// map fields on opts (PerTreeGRPC, FrozenTreeIDs) are shallow-copied so
-// subsequent caller mutations are ignored. The shallow copy is safe because
-// both GRPCConfig and struct{} are fully value-typed; if either map's value
-// type ever grows a reference field, this must become a deeper copy.
+// NewClientManager creates a new ClientManager from the given Options. The map
+// fields on opts (PerTreeGRPC, FrozenTreeIDs) are shallow-copied because
+// getConn reads PerTreeGRPC without a lock: a caller that retained and later
+// mutated the map it passed in would be a data race, not merely a surprise.
 func NewClientManager(opts Options) *ClientManager {
 	perTree := make(map[int64]GRPCConfig, len(opts.PerTreeGRPC))
-	for k, v := range opts.PerTreeGRPC {
-		perTree[k] = v
-	}
+	maps.Copy(perTree, opts.PerTreeGRPC)
 	opts.PerTreeGRPC = perTree
 
 	frozen := make(map[int64]struct{}, len(opts.FrozenTreeIDs))
-	for k := range opts.FrozenTreeIDs {
-		frozen[k] = struct{}{}
-	}
+	maps.Copy(frozen, opts.FrozenTreeIDs)
 	opts.FrozenTreeIDs = frozen
 
 	return &ClientManager{
 		connections:     make(map[GRPCConfig]*grpc.ClientConn),
 		trillianClients: make(map[int64]internalclient.Client),
 		opts:            opts,
-		cachedCfg: cachedClientConfig{
-			RootRPCTimeout:  opts.RootRPCTimeout,
-			PollInterval:    opts.PollInterval,
-			MaxSTHStaleness: opts.MaxSTHStaleness,
-			FrozenTreeIDs:   opts.FrozenTreeIDs,
-		},
 	}
 }
 
@@ -136,13 +134,7 @@ func (cm *ClientManager) getConn(treeID int64) (*grpc.ClientConn, error) {
 		return conn, nil
 	}
 
-	// Check shutdown before dialing. Read clientMu outside connMu to
-	// maintain consistent lock ordering (GetClient acquires
-	// clientMu then calls getConn which acquires connMu).
-	cm.clientMu.RLock()
-	shutting := cm.shutdown
-	cm.clientMu.RUnlock()
-	if shutting {
+	if cm.shutdown.Load() {
 		return nil, errors.New("client manager is shutting down")
 	}
 
@@ -151,10 +143,7 @@ func (cm *ClientManager) getConn(treeID int64) (*grpc.ClientConn, error) {
 
 	// Re-check shutdown after acquiring connMu. Close() may have run
 	// between the early check and here, draining all connections.
-	cm.clientMu.RLock()
-	shutting = cm.shutdown
-	cm.clientMu.RUnlock()
-	if shutting {
+	if cm.shutdown.Load() {
 		return nil, errors.New("client manager is shutting down")
 	}
 
@@ -173,13 +162,15 @@ func (cm *ClientManager) getConn(treeID int64) (*grpc.ClientConn, error) {
 	return newConn, nil
 }
 
-// When CacheSTH is enabled, returns a cached STH client; otherwise returns a simple per-RPC client.
+// GetClient returns the client for treeID, creating it if necessary. When
+// CacheSTH is enabled it returns a cached STH client; otherwise a simple
+// per-RPC client.
 func (cm *ClientManager) GetClient(treeID int64) (internalclient.Client, error) {
-	cm.clientMu.RLock()
-	if cm.shutdown {
-		cm.clientMu.RUnlock()
+	if cm.shutdown.Load() {
 		return nil, errors.New("client manager is shutting down")
 	}
+
+	cm.clientMu.RLock()
 	c, ok := cm.trillianClients[treeID]
 	cm.clientMu.RUnlock()
 	if ok {
@@ -194,7 +185,7 @@ func (cm *ClientManager) GetClient(treeID int64) (internalclient.Client, error) 
 	cm.clientMu.Lock()
 	defer cm.clientMu.Unlock()
 	// Double-check after acquiring the write lock.
-	if cm.shutdown {
+	if cm.shutdown.Load() {
 		return nil, errors.New("client manager is shutting down")
 	}
 	if c, ok = cm.trillianClients[treeID]; ok {
@@ -203,7 +194,7 @@ func (cm *ClientManager) GetClient(treeID int64) (internalclient.Client, error) 
 
 	var newClient internalclient.Client
 	if cm.opts.CacheSTH {
-		newClient = newCachedTrillianClient(trillian.NewTrillianLogClient(conn), treeID, cm.cachedCfg)
+		newClient = newCachedTrillianClient(trillian.NewTrillianLogClient(conn), treeID, cm.opts)
 	} else {
 		newClient = newDirectTrillianClient(trillian.NewTrillianLogClient(conn), treeID)
 	}
@@ -299,9 +290,9 @@ func dial(hostname string, port uint16, tlsCACertFile string, useSystemTrustStor
 func (cm *ClientManager) Close() error {
 	var err error
 
-	// set shutdown flag to true and clear cache of clients
+	cm.shutdown.Store(true)
+
 	cm.clientMu.Lock()
-	cm.shutdown = true
 	oldClients := cm.trillianClients
 	cm.trillianClients = make(map[int64]internalclient.Client)
 	cm.clientMu.Unlock()

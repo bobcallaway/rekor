@@ -17,24 +17,33 @@
 //
 // Two client modes are supported:
 //
-//   - directTrillianClient (default): stateless, per-RPC behavior with no
-//     background goroutines and no cached root state.
+//   - cachedTrillianClient (default; --trillian_log_server.cache_sth): cached
+//     Signed Tree Head (STH) behavior with a background updater.
 //
-//   - cachedTrillianClient (enabled with --trillian_log_server.cache_sth):
-//     cached Signed Tree Head (STH) behavior with a background updater.
+//   - directTrillianClient (--trillian_log_server.cache_sth=false): stateless,
+//     per-RPC behavior with no background goroutines and no cached root state.
 //
 // In cached mode, the client keeps an atomic snapshot of the latest verified
 // root and uses waiter channels to wake only callers whose requested tree size
-// has been reached.
+// has been reached. Each fetched root is proven to be an append-only extension
+// of the one already cached, using the consistency proof Trillian returns
+// alongside it, so a forked or corrupted log cannot be cached and then signed
+// into a checkpoint.
+//
+// Because a cached root proves nothing about Trillian's current liveness, one
+// left uncorroborated for longer than MaxSTHStaleness is not served: the client
+// refetches on demand and reports Unavailable if that does not restore
+// freshness. This bound is enforced on every path that serves the root or signs
+// a proof against it — log-info, both leaf-and-proof lookups, and entry upload
+// — and it is deliberately tight. Operators should expect a Trillian brownout
+// lasting more than a few seconds to surface as 503s rather than as entries
+// vouched for by a root nobody could corroborate.
 //
 // Frozen trees (inactive shards) are identified through configuration and are
 // treated specially: the client initializes once, does not start an updater,
-// and fails fast when callers request sizes that cannot be reached.
+// is exempt from the staleness bound, and fails fast when callers request sizes
+// that cannot be reached.
 //
 // The package exposes metrics for updater health, root advancement, and waiting
 // behavior to support operational monitoring.
-//
-// This package intentionally focuses on behavior and architecture. Any concrete
-// latency or throughput expectations depend on deployment topology, Trillian
-// configuration, and workload characteristics.
 package trillianclient

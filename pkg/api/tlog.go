@@ -55,7 +55,14 @@ func GetLogInfoHandler(params tlog.GetLogInfoParams) middleware.Responder {
 
 	resp := tc.GetLatest(ctx)
 	if resp.Status != codes.OK {
-		return handleRekorAPIError(params, http.StatusInternalServerError, fmt.Errorf("grpc error: %w", resp.Err), trillianCommunicationError)
+		// Unavailable means we could not corroborate the log root right now,
+		// which is transient by nature — 503 tells clients and load balancers
+		// to retry rather than reporting a server defect.
+		code := http.StatusInternalServerError
+		if resp.Status == codes.Unavailable {
+			code = http.StatusServiceUnavailable
+		}
+		return handleRekorAPIError(params, code, fmt.Errorf("grpc error: %w", resp.Err), trillianCommunicationError)
 	}
 	result := resp.GetLatestResult
 
@@ -154,7 +161,7 @@ func inactiveShardLogInfo(ctx context.Context, tid int64, cachedCheckpoints map[
 	}
 	resp := tc.GetLatest(ctx)
 	if resp.Status != codes.OK {
-		return nil, fmt.Errorf("resp code is %d", resp.Status)
+		return nil, fmt.Errorf("resp code is %d: %w", resp.Status, resp.Err)
 	}
 	result := resp.GetLatestResult
 

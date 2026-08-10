@@ -41,23 +41,21 @@ import (
 // advanceRoot updates the cached snapshot and notifies waiters via the channel-per-caller mechanism.
 func advanceRoot(t *testing.T, tc *cachedTrillianClient, size uint64, rootHash []byte) {
 	t.Helper()
-	lr := &types.LogRootV1{TreeSize: size, RootHash: rootHash}
-	b, err := lr.MarshalBinary()
-	require.NoError(t, err)
+	signed := mkSLR(t, size, rootHash)
 	tc.mu.Lock()
-	tc.snapshot.Store(rootSnapshot{root: *lr, signed: &trillian.SignedLogRoot{LogRoot: b}})
+	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: size, RootHash: rootHash}, signed: signed})
 	tc.notifyWaiters(size)
 	tc.mu.Unlock()
 }
 
-// waitForWaiters blocks until at least n callers have registered in tc.waitersByCh,
-// or fails the test after a timeout. Replaces fragile time.Sleep registration barriers.
+// waitForWaiters blocks until at least n callers have registered, or fails the
+// test after a timeout. Replaces fragile time.Sleep registration barriers.
 func waitForWaiters(t *testing.T, tc *cachedTrillianClient, n int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		tc.mu.Lock()
-		got := len(tc.waitersByCh)
+		got := tc.waitersHeap.Len()
 		tc.mu.Unlock()
 		if got >= n {
 			return
@@ -122,7 +120,7 @@ func TestEnsureStartedAndGetLatest(t *testing.T) {
 	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).Return(&trillian.GetLatestSignedLogRootResponse{SignedLogRoot: slr}, nil).MinTimes(1)
 
 	conn := dialMock(t, s.Addr)
-	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 42, cachedClientConfig{})
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 42, Options{})
 	t.Cleanup(tc.Close)
 
 	resp := tc.GetLatest(context.Background())
@@ -137,37 +135,365 @@ func TestEnsureStartedAndGetLatest(t *testing.T) {
 	require.EqualValues(t, 0, got.TreeSize)
 }
 
-func TestGetLatest_RejectsStaleActiveRoot(t *testing.T) {
-	tc := newCachedTrillianClient(nil, 790, cachedClientConfig{MaxSTHStaleness: time.Second})
-	tc.started.Store(true)
-	tc.snapshot.Store(rootSnapshot{
-		root:                    types.LogRootV1{TreeSize: 1},
-		signed:                  mkSLR(t, 1, make([]byte, 32)),
-		lastSuccessfulRootFetch: time.Now().Add(-2 * time.Second),
-	})
+// mockServer starts a Trillian mock server and returns it along with its
+// address, closing both when the test ends.
+func mockServer(t *testing.T) (*testonly.MockServer, string) {
+	t.Helper()
+	mockCtl := gomock.NewController(t)
+	t.Cleanup(mockCtl.Finish)
+	s, closeFn, err := testonly.NewMockServer(mockCtl)
+	require.NoError(t, err)
+	t.Cleanup(closeFn)
+	return s, s.Addr
+}
+
+func rootSize(t *testing.T, resp *internalclient.Response) uint64 {
+	t.Helper()
+	var got types.LogRootV1
+	require.NoError(t, got.UnmarshalBinary(resp.GetLatestResult.SignedLogRoot.LogRoot))
+	return got.TreeSize
+}
+
+func TestGetLatest_RefreshesStaleActiveRoot(t *testing.T) {
+	tr := newLogTree(t, 2)
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).
+		Return(tr.resp(1, 2), nil).Times(1)
+
+	tc := staleStartedClient(t, addr, 790, Options{MaxSTHStaleness: time.Second}, 1, tr.root(1))
+	before := testutil.ToFloat64(metricRootRefresh.WithLabelValues(tc.treeIDStr, "success"))
+
+	resp := tc.GetLatest(context.Background())
+	require.NoError(t, resp.Err)
+	require.Equal(t, codes.OK, resp.Status)
+	require.EqualValues(t, 2, rootSize(t, resp))
+	require.Equal(t, before+1, testutil.ToFloat64(metricRootRefresh.WithLabelValues(tc.treeIDStr, "success")))
+}
+
+func TestGetLatest_StaleRefreshFailureIsUnavailable(t *testing.T) {
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).
+		Return(nil, status.Error(codes.Unavailable, "boom")).Times(1)
+
+	tc := staleStartedClient(t, addr, 793, Options{MaxSTHStaleness: time.Second}, 1, make([]byte, 32))
+	before := testutil.ToFloat64(metricRootRefresh.WithLabelValues(tc.treeIDStr, "error"))
+
+	resp := tc.GetLatest(context.Background())
+	require.Error(t, resp.Err)
+	require.Equal(t, codes.Unavailable, resp.Status)
+	require.Equal(t, before+1, testutil.ToFloat64(metricRootRefresh.WithLabelValues(tc.treeIDStr, "error")))
+}
+
+// A Trillian slow enough that RootRPCTimeout fires is the brownout this whole
+// path exists for. The underlying DeadlineExceeded must not reach the API layer,
+// which reports it as HTTP 500 rather than a retryable 503.
+func TestGetLatest_StaleRefreshTimeoutIsUnavailable(t *testing.T) {
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}).AnyTimes()
+
+	tc := staleStartedClient(t, addr, 804, Options{
+		MaxSTHStaleness: time.Second,
+		RootRPCTimeout:  50 * time.Millisecond,
+	}, 1, make([]byte, 32))
+
+	resp := tc.GetLatest(context.Background())
+	require.Error(t, resp.Err)
+	require.Equal(t, codes.Unavailable, resp.Status)
+	require.Equal(t, codes.Unavailable, status.Code(resp.Err), "Err's code must agree with Status")
+}
+
+// Coalescing alone does not bound a fast-failing Trillian: each attempt clears
+// refreshInFlight before the next request arrives, so without the PollInterval
+// floor the refresh rate would equal the request rate.
+func TestGetLatest_StaleRefreshThrottlesAfterFastFailure(t *testing.T) {
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).
+		Return(nil, status.Error(codes.Unavailable, "boom")).Times(1)
+
+	tc := staleStartedClient(t, addr, 802, Options{MaxSTHStaleness: time.Millisecond, PollInterval: time.Hour}, 1, make([]byte, 32))
+
+	// Serial calls, each completing before the next begins — the shape that
+	// defeats coalescing.
+	for range 5 {
+		require.Equal(t, codes.Unavailable, tc.GetLatest(context.Background()).Status)
+	}
+}
+
+// Startup against a down Trillian is the worst case for init: every request in
+// flight is a first-caller, and each attempt clears initInFlight before the next
+// arrives, so coalescing alone would put init RPCs on a 1:1 footing with
+// requests. Serial calls are the shape that defeats coalescing.
+func TestEnsureStarted_ThrottlesAfterFastFailure(t *testing.T) {
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).
+		Return(nil, status.Error(codes.Unavailable, "boom")).Times(1)
+
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(dialMock(t, addr)), 822, Options{PollInterval: time.Hour})
 	t.Cleanup(tc.Close)
+
+	for range 5 {
+		require.Equal(t, codes.Unavailable, tc.GetLatest(context.Background()).Status)
+	}
+}
+
+// A throttled init must not read as success: there is no cached root behind it,
+// so a nil error would let the caller serve the zero-value snapshot as a real
+// tree of size 0.
+func TestEnsureStarted_ThrottledInitDoesNotServeEmptyTree(t *testing.T) {
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).
+		Return(nil, status.Error(codes.Unavailable, "boom")).Times(1)
+
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(dialMock(t, addr)), 823, Options{PollInterval: time.Hour})
+	t.Cleanup(tc.Close)
+
+	require.Equal(t, codes.Unavailable, tc.GetLatest(context.Background()).Status)
+
+	resp := tc.GetLatest(context.Background()) // throttled
+	require.Equal(t, codes.Unavailable, resp.Status)
+	require.Nil(t, resp.GetLatestResult)
+	require.False(t, tc.started.Load())
+}
+
+// The point of the design: concurrent callers against a stale cache collapse
+// onto a single RPC rather than stampeding Trillian.
+func TestGetLatest_StaleRefreshCoalescesConcurrentCallers(t *testing.T) {
+	tr := newLogTree(t, 2)
+	release := make(chan struct{})
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
+			<-release
+			return tr.resp(1, 2), nil
+		}).Times(1)
+
+	tc := staleStartedClient(t, addr, 794, Options{MaxSTHStaleness: time.Second}, 1, tr.root(1))
+
+	const callers = 16
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			resp := tc.GetLatest(context.Background())
+			require.Equal(t, codes.OK, resp.Status)
+		}()
+	}
+	// Give every caller time to arrive at the shared fetch before it completes.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+}
+
+func TestGetLatest_CallerCancelDuringRefresh(t *testing.T) {
+	tr := newLogTree(t, 2)
+	release := make(chan struct{})
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
+			<-release
+			return tr.resp(1, 2), nil
+		}).Times(1)
+
+	tc := staleStartedClient(t, addr, 795, Options{MaxSTHStaleness: time.Second}, 1, tr.root(1))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan *internalclient.Response, 1)
+	go func() { done <- tc.GetLatest(ctx) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case resp := <-done:
+		require.Equal(t, codes.Canceled, resp.Status)
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled caller did not return promptly")
+	}
+
+	// The shared fetch outlives the caller that started it and still publishes.
+	close(release)
+	require.Eventually(t, func() bool {
+		return tc.snapshot.Load().(rootSnapshot).root.TreeSize == 2
+	}, 2*time.Second, 5*time.Millisecond)
+}
+
+func TestGetLatest_CloseDuringRefresh(t *testing.T) {
+	release := make(chan struct{})
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
+			<-release
+			return &trillian.GetLatestSignedLogRootResponse{SignedLogRoot: mkSLR(t, 2, make([]byte, 32))}, nil
+		}).AnyTimes()
+
+	// Unblock the handler only once the test is over, so the refresh RPC is
+	// still on the wire while Close runs. Releasing it earlier would leave the
+	// publish racing Close's stopCh rather than deterministically losing to it.
+	defer close(release)
+
+	tc := staleStartedClient(t, addr, 796, Options{MaxSTHStaleness: time.Second}, 1, make([]byte, 32))
+
+	go tc.GetLatest(context.Background()) //nolint:errcheck // result is irrelevant; Close is under test
+	time.Sleep(20 * time.Millisecond)
+
+	closed := make(chan struct{})
+	go func() { tc.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked on an in-flight refresh")
+	}
+	// bgCancel aborts the in-flight refresh, so it fails in fetchRoot and never
+	// reaches publishRoot — the cached root is untouched under every
+	// interleaving, including Close winning the race before the RPC is sent.
+	require.EqualValues(t, 1, tc.snapshot.Load().(rootSnapshot).root.TreeSize)
+}
+
+// A refresh RPC can succeed while returning a root we refuse to trust. The
+// timestamp is not stamped in that case, so GetLatest must still fail.
+func TestGetLatest_StaleRefreshIntegrityAnomaly(t *testing.T) {
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).
+		Return(&trillian.GetLatestSignedLogRootResponse{SignedLogRoot: mkSLR(t, 1, bytes.Repeat([]byte{0xbb}, 32))}, nil).Times(1)
+
+	tc := staleStartedClient(t, addr, 797, Options{MaxSTHStaleness: time.Second}, 1, bytes.Repeat([]byte{0xaa}, 32))
+	before := testutil.ToFloat64(metricRootIntegrityAnomaly.WithLabelValues(tc.treeIDStr))
+	beforeRejected := testutil.ToFloat64(metricRootRefresh.WithLabelValues(tc.treeIDStr, "rejected"))
 
 	resp := tc.GetLatest(context.Background())
 	require.Equal(t, codes.Unavailable, resp.Status)
-	require.Error(t, resp.Err)
+	require.Equal(t, before+1, testutil.ToFloat64(metricRootIntegrityAnomaly.WithLabelValues(tc.treeIDStr)))
+	// The RPC succeeded, so this must not be counted as a refresh success.
+	require.Equal(t, beforeRejected+1, testutil.ToFloat64(metricRootRefresh.WithLabelValues(tc.treeIDStr, "rejected")))
 }
 
-func TestGetLatest_AllowsStaleFrozenRoot(t *testing.T) {
-	tc := newCachedTrillianClient(nil, 791, cachedClientConfig{
-		MaxSTHStaleness: time.Second,
-		FrozenTreeIDs:   map[int64]struct{}{791: {}},
-	})
-	tc.started.Store(true)
-	tc.snapshot.Store(rootSnapshot{
-		root:                    types.LogRootV1{TreeSize: 1},
-		signed:                  mkSLR(t, 1, make([]byte, 32)),
-		lastSuccessfulRootFetch: time.Now().Add(-2 * time.Second),
-	})
-	t.Cleanup(tc.Close)
+// A smaller returned root should never happen — the log does not move backwards
+// — but the guard against it must not itself be a failure mode: the fetch still
+// corroborated the cache, so it clears staleness while leaving the larger cached
+// root in place.
+func TestGetLatest_StaleRefreshBackwardsRoot(t *testing.T) {
+	rootHash := bytes.Repeat([]byte{0x45}, 32)
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).
+		Return(&trillian.GetLatestSignedLogRootResponse{SignedLogRoot: mkSLR(t, 3, rootHash)}, nil).Times(1)
+
+	tc := staleStartedClient(t, addr, 798, Options{MaxSTHStaleness: time.Second}, 5, rootHash)
 
 	resp := tc.GetLatest(context.Background())
 	require.Equal(t, codes.OK, resp.Status)
+	require.EqualValues(t, 5, rootSize(t, resp))
+	require.False(t, tc.isStale())
+}
+
+func TestGetLatest_AllowsStaleFrozenRootWithoutRefresh(t *testing.T) {
+	_, addr := mockServer(t) // no EXPECT: any RPC fails the controller
+	tc := staleStartedClient(t, addr, 791, Options{
+		MaxSTHStaleness: time.Second,
+		FrozenTreeIDs:   map[int64]struct{}{791: {}},
+	}, 1, make([]byte, 32))
+
+	resp := tc.GetLatest(context.Background())
 	require.NoError(t, resp.Err)
+	require.Equal(t, codes.OK, resp.Status)
+}
+
+func TestGetLatest_FreshCacheIssuesNoRPC(t *testing.T) {
+	_, addr := mockServer(t) // no EXPECT: any RPC fails the controller
+	tc := staleStartedClient(t, addr, 799, Options{MaxSTHStaleness: time.Minute}, 1, make([]byte, 32))
+	tc.stampRootFetch()
+
+	resp := tc.GetLatest(context.Background())
+	require.NoError(t, resp.Err)
+	require.Equal(t, codes.OK, resp.Status)
+}
+
+func TestNewCachedTrillianClient_NormalizesConfig(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		in              Options
+		pollInterval    time.Duration
+		maxSTHStaleness time.Duration
+	}{
+		{
+			name:            "zero defaults",
+			in:              Options{},
+			pollInterval:    DefaultPollInterval,
+			maxSTHStaleness: successfulRootFetchMaxPollIntervals*DefaultPollInterval + DefaultRootRPCTimeout,
+		},
+		{
+			// Cost is linear in 1/PollInterval and permanent; the benefit stops
+			// at Trillian's sequencer interval. A typo must not bill 1000
+			// RPCs/sec/shard forever.
+			name:            "below the floor is clamped",
+			in:              Options{PollInterval: time.Millisecond, RootRPCTimeout: time.Second},
+			pollInterval:    MinPollInterval,
+			maxSTHStaleness: successfulRootFetchMaxPollIntervals*MinPollInterval + time.Second,
+		},
+		{
+			name:            "explicit values are respected",
+			in:              Options{PollInterval: 500 * time.Millisecond, RootRPCTimeout: time.Second, MaxSTHStaleness: time.Minute},
+			pollInterval:    500 * time.Millisecond,
+			maxSTHStaleness: time.Minute,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := newCachedTrillianClient(nil, 830, tt.in)
+			t.Cleanup(tc.Close)
+			require.Equal(t, tt.pollInterval, tc.config.PollInterval)
+			require.Equal(t, tt.maxSTHStaleness, tc.config.MaxSTHStaleness)
+		})
+	}
+}
+
+// The freshness bound is a property of the cached root, not of GetLatest. Every
+// path that serves that root — or signs a proof against it — has to enforce it,
+// or the bound is advertised and unenforced on three of four entry points.
+func TestStaleCacheIsUnavailableOnEveryReadPath(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		call func(*cachedTrillianClient) *internalclient.Response
+	}{
+		{"GetLatest", func(tc *cachedTrillianClient) *internalclient.Response {
+			return tc.GetLatest(context.Background())
+		}},
+		{"GetLeafAndProofByHash", func(tc *cachedTrillianClient) *internalclient.Response {
+			return tc.GetLeafAndProofByHash(context.Background(), bytes.Repeat([]byte{0x01}, 32))
+		}},
+		{"GetLeafAndProofByIndex", func(tc *cachedTrillianClient) *internalclient.Response {
+			return tc.GetLeafAndProofByIndex(context.Background(), 0)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, addr := mockServer(t)
+			// The refresh is the only RPC permitted: reaching a proof RPC against
+			// an uncorroborated root is the failure this test exists to catch.
+			s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).
+				Return(nil, status.Error(codes.Unavailable, "boom")).Times(1)
+
+			tc := staleStartedClient(t, addr, 820, Options{MaxSTHStaleness: time.Second}, 4, make([]byte, 32))
+			resp := tt.call(tc)
+			require.Equal(t, codes.Unavailable, resp.Status)
+			require.Equal(t, codes.Unavailable, status.Code(resp.Err), "Err's code must agree with Status")
+		})
+	}
+}
+
+// AddLeaf gates before QueueLeaf, so a stale cache costs the caller an error
+// rather than an entry that is in the log but reported as failed. The absent
+// QueueLeaf expectation is the assertion: gomock fails the test if it is called.
+func TestAddLeaf_StaleCacheDoesNotQueue(t *testing.T) {
+	s, addr := mockServer(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).
+		Return(nil, status.Error(codes.Unavailable, "boom")).Times(1)
+
+	tc := staleStartedClient(t, addr, 821, Options{MaxSTHStaleness: time.Second}, 4, make([]byte, 32))
+	resp := tc.AddLeaf(context.Background(), []byte("entry"))
+	require.Equal(t, codes.Unavailable, resp.Status)
+	require.Nil(t, resp.GetAddResult)
 }
 
 func TestPublishRoot_RefreshesSuccessfulFetchTimeAndMetric(t *testing.T) {
@@ -175,24 +501,20 @@ func TestPublishRoot_RefreshesSuccessfulFetchTimeAndMetric(t *testing.T) {
 	rootHash := bytes.Repeat([]byte{0x42}, 32)
 	root := types.LogRootV1{TreeSize: 1, RootHash: rootHash}
 	signed := mkSLR(t, 1, rootHash)
-	tc := newCachedTrillianClient(nil, treeID, cachedClientConfig{})
-	tc.snapshot.Store(rootSnapshot{
-		root:                    root,
-		signed:                  signed,
-		lastSuccessfulRootFetch: time.Now().Add(-time.Hour),
-	})
+	tc := newCachedTrillianClient(nil, treeID, Options{})
+	tc.snapshot.Store(rootSnapshot{root: root, signed: signed})
+	tc.lastRootFetch.Store(time.Now().Add(-time.Hour).UnixNano())
 	t.Cleanup(tc.Close)
 
 	tc.publishRoot(root, signed)
-	snap := tc.snapshot.Load().(rootSnapshot)
-	require.WithinDuration(t, time.Now(), snap.lastSuccessfulRootFetch, time.Second)
+	require.Less(t, tc.rootAge(), time.Second)
 	require.Greater(t, testutil.ToFloat64(metricLastSuccessfulRootFetch.WithLabelValues(tc.treeIDStr)), float64(time.Now().Add(-time.Second).Unix()))
 }
 
 // Note: waiting for an advance via the background updater's fixed-cadence poll
 // is exercised indirectly in other tests (AddLeaf), and is hard to
 // deterministically simulate across environments with the mock server; we avoid
-// a direct "firstSize" wait test here.
+// a direct waitForInclusionWithMinSize wait test here.
 
 func TestGetLeafAndProofByIndex_VerifiesProof(t *testing.T) {
 	mockCtl := gomock.NewController(t)
@@ -221,7 +543,7 @@ func TestGetLeafAndProofByIndex_VerifiesProof(t *testing.T) {
 	).Times(1)
 
 	conn := dialMock(t, s.Addr)
-	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 9, cachedClientConfig{})
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 9, Options{})
 	t.Cleanup(tc.Close)
 
 	resp := tc.GetLeafAndProofByIndex(context.Background(), 0)
@@ -258,7 +580,7 @@ func TestGetLeafAndProofByHash_VerifiesProof(t *testing.T) {
 	).Times(1)
 
 	conn := dialMock(t, s.Addr)
-	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 13, cachedClientConfig{})
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 13, Options{})
 	t.Cleanup(tc.Close)
 
 	resp := tc.GetLeafAndProofByHash(context.Background(), rootHash)
@@ -310,11 +632,10 @@ func TestAddLeaf_HappyPath(t *testing.T) {
 	).Times(1)
 
 	conn := dialMock(t, s.Addr)
-	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 21, cachedClientConfig{})
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 21, Options{})
 	// Pre-initialize
 	tc.started.Store(true)
-	tc.v = client.NewLogVerifier(rfc6962.DefaultHasher)
-	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0, RootHash: make([]byte, 32)}, signed: slr0})
+	tc.storeSnapshot(types.LogRootV1{TreeSize: 0, RootHash: make([]byte, 32)}, slr0)
 	// Advance snapshot to size=2 once AddLeaf has registered its inclusion waiter.
 	go func() {
 		waitForWaiters(t, tc, 1)
@@ -342,7 +663,7 @@ func TestEnsureStartedError(t *testing.T) {
 	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).Return(nil, status.Error(codes.Unavailable, "boom")).Times(1)
 
 	conn := dialMock(t, s.Addr)
-	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 99, cachedClientConfig{})
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 99, Options{})
 	t.Cleanup(tc.Close)
 
 	resp := tc.GetLatest(context.Background())
@@ -353,7 +674,7 @@ func TestEnsureStartedError(t *testing.T) {
 func TestWaitForRootAtLeast_BroadcastWakesAll(t *testing.T) {
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
-	tc := newCachedTrillianClient(nil, 100, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 100, Options{})
 	// Start with size 0
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}})
 	t.Cleanup(tc.Close)
@@ -410,7 +731,7 @@ func TestEnsureStarted_SingleRPCWithFanIn(t *testing.T) {
 	).Times(1)
 
 	conn := dialMock(t, s.Addr)
-	cfg := cachedClientConfig{}
+	cfg := Options{}
 	cfg.FrozenTreeIDs = map[int64]struct{}{222: {}} // prevents updater RPC noise
 	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 222, cfg)
 	t.Cleanup(tc.Close)
@@ -438,7 +759,7 @@ func TestEnsureStarted_SingleRPCWithFanIn(t *testing.T) {
 func TestWaitForRootAtLeast_SpuriousBroadcastIgnored(t *testing.T) {
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
-	tc := newCachedTrillianClient(nil, 303, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 303, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 1}})
 	t.Cleanup(tc.Close)
 
@@ -462,7 +783,7 @@ func TestWaitForRootAtLeast_SpuriousBroadcastIgnored(t *testing.T) {
 	// waiters for size 5 should remain registered.
 	advanceRoot(t, tc, 3, make([]byte, 32))
 	tc.mu.Lock()
-	stillWaiting := len(tc.waitersByCh)
+	stillWaiting := tc.waitersHeap.Len()
 	tc.mu.Unlock()
 	require.Equal(t, numWaiters, stillWaiting, "waiters should remain registered when size is below target")
 
@@ -485,10 +806,13 @@ func TestWaitForRootAtLeast_SpuriousBroadcastIgnored(t *testing.T) {
 func TestSnapshotConcurrentReadersWriters_NoDataRace(t *testing.T) {
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
-	tc := newCachedTrillianClient(nil, 404, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 404, Options{})
 	tc.started.Store(true)
-	// Provide a minimal signed root so GetLatest can return without NotFound
-	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}, signed: mkSLR(t, 0, make([]byte, 32)), lastSuccessfulRootFetch: time.Now()})
+	// Provide a minimal signed root so GetLatest can return without NotFound,
+	// and stamp it so readers never trip the staleness refresh (the client has
+	// no gRPC connection).
+	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}, signed: mkSLR(t, 0, make([]byte, 32))})
+	tc.stampRootFetch()
 	t.Cleanup(tc.Close)
 
 	stop := make(chan struct{})
@@ -504,7 +828,7 @@ func TestSnapshotConcurrentReadersWriters_NoDataRace(t *testing.T) {
 			lr := &types.LogRootV1{TreeSize: sz}
 			b, _ := lr.MarshalBinary()
 			tc.mu.Lock()
-			tc.snapshot.Store(rootSnapshot{root: *lr, signed: &trillian.SignedLogRoot{LogRoot: b}, lastSuccessfulRootFetch: time.Now()})
+			tc.storeSnapshot(*lr, &trillian.SignedLogRoot{LogRoot: b})
 			tc.notifyWaiters(sz)
 			tc.mu.Unlock()
 		}
@@ -553,17 +877,17 @@ func TestEnsureStarted_RespectsCallerCtx(t *testing.T) {
 	defer closeFn()
 
 	// Server takes 100ms — well past the tight caller's 5ms deadline, but well
-	// within RootRPCTimeout. Init must eventually succeed and serve
-	// concurrent patient callers via the coalesced in-flight state.
+	// within RootRPCTimeout. The init the tight caller abandoned keeps running,
+	// so a later patient caller coalesces onto it rather than starting its own.
 	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, _ *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
 			time.Sleep(100 * time.Millisecond)
 			return &trillian.GetLatestSignedLogRootResponse{SignedLogRoot: mkSLR(t, 7, make([]byte, 32))}, nil
 		},
-	).Times(1) // init runs exactly once even under concurrent callers
+	).Times(1) // the abandoning caller must not cause a second init RPC
 
 	conn := dialMock(t, s.Addr)
-	cfg := cachedClientConfig{}
+	cfg := Options{}
 	cfg.FrozenTreeIDs = map[int64]struct{}{606: {}} // avoid updater noise
 	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 606, cfg)
 	t.Cleanup(tc.Close)
@@ -609,7 +933,7 @@ func TestClose_UnblocksStuckInit(t *testing.T) {
 	).AnyTimes()
 
 	conn := dialMock(t, s.Addr)
-	cfg := cachedClientConfig{RootRPCTimeout: 10 * time.Second} // long, so if Close waited on it the test would fail
+	cfg := Options{RootRPCTimeout: 10 * time.Second} // long, so if Close waited on it the test would fail
 	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 608, cfg)
 
 	// Kick off init in a goroutine so it's in flight when Close is called.
@@ -636,7 +960,9 @@ func TestClose_UnblocksStuckInit(t *testing.T) {
 }
 
 func TestEnsureStarted_InitTimeoutRespected(t *testing.T) {
-	// RootRPCTimeout still bounds init when Trillian is genuinely slow.
+	// RootRPCTimeout still bounds init when Trillian is genuinely slow, and the
+	// resulting DeadlineExceeded is reported as Unavailable: a slow Trillian is
+	// something to retry, not a server defect.
 	mockCtl := gomock.NewController(t)
 	defer mockCtl.Finish()
 
@@ -654,7 +980,7 @@ func TestEnsureStarted_InitTimeoutRespected(t *testing.T) {
 	).AnyTimes()
 
 	conn := dialMock(t, s.Addr)
-	cfg := cachedClientConfig{}
+	cfg := Options{}
 	cfg.RootRPCTimeout = 50 * time.Millisecond
 	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 607, cfg)
 	t.Cleanup(tc.Close)
@@ -664,7 +990,7 @@ func TestEnsureStarted_InitTimeoutRespected(t *testing.T) {
 	elapsed := time.Since(start)
 
 	require.Error(t, resp.Err)
-	require.Equal(t, codes.DeadlineExceeded, resp.Status)
+	require.Equal(t, codes.Unavailable, resp.Status)
 	require.False(t, tc.started.Load(), "started must remain false on init failure so retry is possible")
 	require.Less(t, elapsed, 500*time.Millisecond, "init should give up near RootRPCTimeout, not hang")
 }
@@ -672,7 +998,7 @@ func TestEnsureStarted_InitTimeoutRespected(t *testing.T) {
 // --- New tests for channel-per-caller and edge cases ---
 
 func TestWaitForRootAtLeast_AlreadySatisfied(t *testing.T) {
-	tc := newCachedTrillianClient(nil, 500, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 500, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 10}})
 	t.Cleanup(tc.Close)
 
@@ -686,7 +1012,7 @@ func TestWaitForRootAtLeast_AlreadySatisfied(t *testing.T) {
 func TestWaitForRootAtLeast_ContextCancellation(t *testing.T) {
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
-	tc := newCachedTrillianClient(nil, 501, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 501, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}})
 	t.Cleanup(tc.Close)
 
@@ -705,16 +1031,37 @@ func TestWaitForRootAtLeast_ContextCancellation(t *testing.T) {
 	select {
 	case err := <-done:
 		require.Error(t, err)
-		require.ErrorIs(t, err, context.Canceled)
+		// Must carry codes.Canceled, not codes.Unknown: the API layer maps the
+		// status code straight to HTTP, so a bare context error becomes a 500.
+		require.Equal(t, codes.Canceled, status.Code(err))
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("waiter was not unblocked by context cancellation")
 	}
 }
 
+// TestWaitForInclusion_ExpiredContext_ReportsDeadlineExceeded covers the loop
+// guard in waitForInclusionWithMinSize. A bare ctx.Err() there is codes.Unknown,
+// which the API layer renders as HTTP 500 for what is really a client timeout.
+func TestWaitForInclusion_ExpiredContext_ReportsDeadlineExceeded(t *testing.T) {
+	opt := goleak.IgnoreCurrent()
+	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
+	tc := newCachedTrillianClient(nil, 506, Options{})
+	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 5}})
+	t.Cleanup(tc.Close)
+
+	// Already past its deadline, so the guard trips before any proof RPC.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	resp := tc.waitForInclusionWithMinSize(ctx, bytes.Repeat([]byte{0x01}, 32), 1)
+	require.Error(t, resp.Err)
+	require.Equal(t, codes.DeadlineExceeded, resp.Status)
+}
+
 func TestClose_UnblocksAllWaiters(t *testing.T) {
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
-	tc := newCachedTrillianClient(nil, 502, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 502, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}})
 
 	const numWaiters = 5
@@ -746,35 +1093,59 @@ func TestClose_UnblocksAllWaiters(t *testing.T) {
 	}
 }
 
-// TestWaitForRootAtLeast_AfterClose_NoPanic guards against a regression where
-// Close nil'd the waiters map, causing a subsequent waitForRootAtLeast caller
-// that raced past the fast path to panic on assignment to a nil map inside
-// registerWaiter. The current implementation must return codes.Canceled
-// cleanly instead.
+// TestRemoveWaiter_AfterCloseDrain_NoPanic pins the contract between Close's
+// drain and removeWaiter. Close closes every waiter channel and nils the heap;
+// a waiter woken by that drain may still take its stopCh branch and call
+// removeWaiter. Unless the drain clears index, that is a heap.Remove against a
+// nil heap. TestClose_UnblocksAllWaiters only hits this branch by racing the
+// select, so assert it directly.
+func TestRemoveWaiter_AfterCloseDrain_NoPanic(t *testing.T) {
+	opt := goleak.IgnoreCurrent()
+	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
+	tc := newCachedTrillianClient(nil, 505, Options{})
+	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}})
+
+	tc.mu.Lock()
+	w := tc.registerWaiter(99)
+	tc.mu.Unlock()
+
+	tc.Close()
+
+	tc.mu.Lock()
+	require.Nil(t, tc.waitersHeap, "Close must drop the heap")
+	require.Negative(t, w.index, "drain must mark drained waiters as removed")
+	require.NotPanics(t, func() { tc.removeWaiter(w) })
+	tc.mu.Unlock()
+}
+
+// TestWaitForRootAtLeast_AfterClose_NoPanic guards against a regression where a
+// waitForRootAtLeast caller arriving after Close registered a waiter that
+// nothing would ever signal. waitForRootAtLeast must observe stopCh under t.mu
+// before registering and return codes.Canceled instead.
 func TestWaitForRootAtLeast_AfterClose_NoPanic(t *testing.T) {
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
-	tc := newCachedTrillianClient(nil, 504, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 504, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}})
 
 	tc.Close()
 
 	// Any request above the current size after Close must return Canceled
-	// without panicking on a nil waiters map.
+	// rather than blocking on a waiter no advance will ever satisfy.
 	err := tc.waitForRootAtLeast(context.Background(), 999)
 	require.Error(t, err)
 	require.Equal(t, codes.Canceled, status.Code(err))
 }
 
 // TestClose_Idempotent guards against a regression where a second Close would
-// panic on double-close of the waiter channels (the map retained entries
+// panic on double-close of the waiter channels (the heap retained entries
 // pointing at already-closed channels). Close must now be safe to invoke
 // multiple times, including concurrently, and each caller must synchronize
 // with the updater's exit before returning.
 func TestClose_Idempotent(t *testing.T) {
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
-	tc := newCachedTrillianClient(nil, 505, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 505, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}})
 
 	// Register a waiter so the first Close has a channel to close.
@@ -803,14 +1174,14 @@ func TestClose_Idempotent(t *testing.T) {
 }
 
 func TestNotifyWaiters_PartialSatisfaction(t *testing.T) {
-	tc := newCachedTrillianClient(nil, 503, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 503, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}})
 	t.Cleanup(tc.Close)
 
 	tc.mu.Lock()
-	ch3 := tc.registerWaiter(3)
-	ch5 := tc.registerWaiter(5)
-	ch10 := tc.registerWaiter(10)
+	w3 := tc.registerWaiter(3)
+	w5 := tc.registerWaiter(5)
+	w10 := tc.registerWaiter(10)
 	tc.mu.Unlock()
 
 	// Notify with size 5: should satisfy waiters for 3 and 5, but not 10
@@ -818,59 +1189,52 @@ func TestNotifyWaiters_PartialSatisfaction(t *testing.T) {
 	tc.notifyWaiters(5)
 	tc.mu.Unlock()
 
-	// ch3 and ch5 should be closed (readable immediately)
+	// w3 and w5 should be closed (readable immediately)
 	select {
-	case <-ch3:
+	case <-w3.ch:
 		// expected
 	default:
 		t.Fatal("waiter for size 3 should have been notified")
 	}
 	select {
-	case <-ch5:
+	case <-w5.ch:
 		// expected
 	default:
 		t.Fatal("waiter for size 5 should have been notified")
 	}
 
-	// ch10 should NOT be closed
+	// w10 should NOT be closed
 	select {
-	case <-ch10:
+	case <-w10.ch:
 		t.Fatal("waiter for size 10 should NOT have been notified")
 	default:
 		// expected
 	}
 
-	// Verify remaining waiters count and heap/map coherence
 	tc.mu.Lock()
-	require.Len(t, tc.waitersByCh, 1)
-	require.Equal(t, tc.waitersHeap.Len(), len(tc.waitersByCh), "heap and map must agree")
-	require.Equal(t, uint64(10), tc.waitersByCh[ch10].size)
+	require.Equal(t, 1, tc.waitersHeap.Len())
+	require.Equal(t, uint64(10), tc.waitersHeap[0].size)
 	tc.mu.Unlock()
 }
 
 func TestRemoveWaiter_Cleanup(t *testing.T) {
-	tc := newCachedTrillianClient(nil, 504, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 504, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}})
 	t.Cleanup(tc.Close)
 
 	tc.mu.Lock()
-	ch1 := tc.registerWaiter(5)
-	ch2 := tc.registerWaiter(10)
-	require.Len(t, tc.waitersByCh, 2)
-	require.Equal(t, tc.waitersHeap.Len(), len(tc.waitersByCh), "heap and map must agree after register")
+	w5 := tc.registerWaiter(5)
+	w10 := tc.registerWaiter(10)
+	require.Equal(t, 2, tc.waitersHeap.Len())
 
-	tc.removeWaiter(ch1)
-	require.Len(t, tc.waitersByCh, 1)
-	require.Equal(t, tc.waitersHeap.Len(), len(tc.waitersByCh), "heap and map must agree after remove")
-	_, ok := tc.waitersByCh[ch2]
-	require.True(t, ok)
-	_, ok = tc.waitersByCh[ch1]
-	require.False(t, ok)
+	tc.removeWaiter(w5)
+	require.Equal(t, 1, tc.waitersHeap.Len())
+	require.Same(t, w10, tc.waitersHeap[0])
 
-	// Remove non-existent channel is a no-op
-	tc.removeWaiter(make(chan struct{}))
-	require.Len(t, tc.waitersByCh, 1)
-	require.Equal(t, tc.waitersHeap.Len(), len(tc.waitersByCh), "heap and map must agree after no-op remove")
+	// Removing an already-removed waiter is a no-op, not a heap corruption.
+	tc.removeWaiter(w5)
+	require.Equal(t, 1, tc.waitersHeap.Len())
+	require.Same(t, w10, tc.waitersHeap[0])
 	tc.mu.Unlock()
 }
 
@@ -878,31 +1242,29 @@ func TestRemoveWaiter_Cleanup(t *testing.T) {
 // shuffled target sizes and asserts notifyWaiters wakes exactly the correct
 // prefix at each threshold. Exercises the min-heap ordering property.
 func TestWaiterHeap_OrderingUnderShuffledSizes(t *testing.T) {
-	tc := newCachedTrillianClient(nil, 510, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 510, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}})
 	t.Cleanup(tc.Close)
 
 	// Register waiters at sizes chosen to force multiple heap re-siftings.
 	sizes := []uint64{50, 10, 100, 20, 5, 75, 30, 1, 60, 40}
-	chans := make([]chan struct{}, len(sizes))
+	waiters := make([]*waiterItem, len(sizes))
 	tc.mu.Lock()
 	for i, sz := range sizes {
-		chans[i] = tc.registerWaiter(sz)
+		waiters[i] = tc.registerWaiter(sz)
 	}
-	require.Len(t, tc.waitersByCh, len(sizes))
-	require.Equal(t, tc.waitersHeap.Len(), len(tc.waitersByCh))
+	require.Equal(t, len(sizes), tc.waitersHeap.Len())
 	tc.mu.Unlock()
 
 	// Step 1: notify size 25 — wakes 1, 5, 10, 20 (4 waiters), leaves 6.
 	tc.mu.Lock()
 	tc.notifyWaiters(25)
-	require.Len(t, tc.waitersByCh, 6)
-	require.Equal(t, tc.waitersHeap.Len(), len(tc.waitersByCh))
+	require.Equal(t, 6, tc.waitersHeap.Len())
 	tc.mu.Unlock()
 
 	for i, sz := range sizes {
 		select {
-		case <-chans[i]:
+		case <-waiters[i].ch:
 			require.LessOrEqual(t, sz, uint64(25), "only waiters with size ≤ 25 should be closed")
 		default:
 			require.Greater(t, sz, uint64(25), "waiters with size > 25 should still be open")
@@ -912,14 +1274,13 @@ func TestWaiterHeap_OrderingUnderShuffledSizes(t *testing.T) {
 	// Step 2: notify size 60 — wakes 30, 40, 50, 60 (4 more), leaves 2 (75, 100).
 	tc.mu.Lock()
 	tc.notifyWaiters(60)
-	require.Len(t, tc.waitersByCh, 2)
-	require.Equal(t, tc.waitersHeap.Len(), len(tc.waitersByCh))
+	require.Equal(t, 2, tc.waitersHeap.Len())
 	tc.mu.Unlock()
 
 	for i, sz := range sizes {
 		if sz > 25 {
 			select {
-			case <-chans[i]:
+			case <-waiters[i].ch:
 				require.LessOrEqual(t, sz, uint64(60), "only waiters with size ≤ 60 should now be closed")
 			default:
 				require.Greater(t, sz, uint64(60))
@@ -930,7 +1291,6 @@ func TestWaiterHeap_OrderingUnderShuffledSizes(t *testing.T) {
 	// Step 3: notify size 1000 — drain everything.
 	tc.mu.Lock()
 	tc.notifyWaiters(1000)
-	require.Empty(t, tc.waitersByCh)
 	require.Zero(t, tc.waitersHeap.Len())
 	tc.mu.Unlock()
 }
@@ -939,55 +1299,54 @@ func TestWaiterHeap_OrderingUnderShuffledSizes(t *testing.T) {
 // at the root of the heap, then verifies subsequent notify still wakes the
 // correct set. Regression guard for a broken heap.Remove index-tracking.
 func TestRemoveWaiter_MidHeap_PreservesInvariants(t *testing.T) {
-	tc := newCachedTrillianClient(nil, 511, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 511, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}})
 	t.Cleanup(tc.Close)
 
 	tc.mu.Lock()
 	// Push in an order that puts size 50 somewhere in the interior of the heap.
-	ch10 := tc.registerWaiter(10)
-	ch50 := tc.registerWaiter(50)
-	ch20 := tc.registerWaiter(20)
-	ch60 := tc.registerWaiter(60)
-	ch30 := tc.registerWaiter(30)
+	w10 := tc.registerWaiter(10)
+	w50 := tc.registerWaiter(50)
+	w20 := tc.registerWaiter(20)
+	w60 := tc.registerWaiter(60)
+	w30 := tc.registerWaiter(30)
 
 	// Remove an interior waiter (size 50 will not be at index 0 given size 10 is smallest).
-	require.NotZero(t, tc.waitersByCh[ch50].index, "size 50 should not be the heap root here")
-	tc.removeWaiter(ch50)
-	require.Len(t, tc.waitersByCh, 4)
-	require.Equal(t, tc.waitersHeap.Len(), len(tc.waitersByCh))
+	require.NotZero(t, w50.index, "size 50 should not be the heap root here")
+	tc.removeWaiter(w50)
+	require.Equal(t, 4, tc.waitersHeap.Len())
 
 	// Notify size 35 — wakes 10, 20, 30. Leaves 60. 50 was removed and must not fire.
 	tc.notifyWaiters(35)
 	tc.mu.Unlock()
 
 	for _, tt := range []struct {
-		ch     chan struct{}
+		w      *waiterItem
 		wake   bool
 		reason string
 	}{
-		{ch10, true, "size 10 ≤ 35"},
-		{ch20, true, "size 20 ≤ 35"},
-		{ch30, true, "size 30 ≤ 35"},
-		{ch60, false, "size 60 > 35"},
+		{w10, true, "size 10 ≤ 35"},
+		{w20, true, "size 20 ≤ 35"},
+		{w30, true, "size 30 ≤ 35"},
+		{w60, false, "size 60 > 35"},
 	} {
 		select {
-		case <-tt.ch:
+		case <-tt.w.ch:
 			require.True(t, tt.wake, tt.reason)
 		default:
 			require.False(t, tt.wake, tt.reason)
 		}
 	}
-	// ch50 was removed, so it must not have been closed by notify.
+	// w50 was removed, so it must not have been closed by notify.
 	select {
-	case <-ch50:
-		t.Fatal("removed waiter (ch50) must not be closed by notify")
+	case <-w50.ch:
+		t.Fatal("removed waiter (size 50) must not be closed by notify")
 	default:
 	}
 
 	tc.mu.Lock()
-	require.Len(t, tc.waitersByCh, 1) // only ch60 remains
-	require.Equal(t, tc.waitersHeap.Len(), len(tc.waitersByCh))
+	require.Equal(t, 1, tc.waitersHeap.Len()) // only size 60 remains
+	require.Same(t, w60, tc.waitersHeap[0])
 	tc.mu.Unlock()
 }
 
@@ -1012,7 +1371,7 @@ func TestUpdater_RetriesOnTransientErrors(t *testing.T) {
 	).AnyTimes()
 
 	conn := dialMock(t, s.Addr)
-	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 600, cachedClientConfig{PollInterval: 20 * time.Millisecond})
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 600, Options{PollInterval: 20 * time.Millisecond})
 	t.Cleanup(tc.Close)
 
 	initial := types.LogRootV1{TreeSize: 1, RootHash: rootHash1}
@@ -1077,7 +1436,7 @@ func TestUpdater_HangingRPCTimesOutAndNextPollFires(t *testing.T) {
 	conn := dialMock(t, s.Addr)
 	// Tight RootRPCTimeout so each hang unwinds quickly. Short PollInterval
 	// so the retry after backoff+wait completes within the test window.
-	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 601, cachedClientConfig{
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 601, Options{
 		PollInterval:   10 * time.Millisecond,
 		RootRPCTimeout: 50 * time.Millisecond,
 	})
@@ -1134,6 +1493,40 @@ func TestClientManager_CachesClientPerTreeID(t *testing.T) {
 	require.NotSame(t, c1, c3, "different tree IDs should return distinct client instances")
 }
 
+// TestClientManager_ConcurrentGetClientAndClose exercises the shutdown flag
+// from both sides at once. It previously required getConn to take clientMu
+// while holding connMu, the reverse of the order Close uses; the flag is now
+// atomic so neither path nests the two mutexes.
+func TestClientManager_ConcurrentGetClientAndClose(t *testing.T) {
+	mockCtl := gomock.NewController(t)
+	defer mockCtl.Finish()
+
+	s, closeFn, err := testonly.NewMockServer(mockCtl)
+	require.NoError(t, err)
+	defer closeFn()
+
+	cm := NewClientManager(Options{DefaultGRPC: GRPCConfig{Address: s.Addr, Port: 0}})
+
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Go(func() {
+			// Either a client or a shutting-down error is fine; a deadlock,
+			// a race, or a nil client is not.
+			c, err := cm.GetClient(int64(i % 4))
+			if err == nil {
+				require.NotNil(t, c)
+			} else {
+				require.Contains(t, err.Error(), "shutting down")
+			}
+		})
+	}
+	wg.Go(func() { require.NoError(t, cm.Close()) })
+	wg.Wait()
+
+	_, err = cm.GetClient(0)
+	require.Error(t, err)
+}
+
 func TestClientManagerClose_ClosesClients(t *testing.T) {
 	cm := NewClientManager(Options{DefaultGRPC: GRPCConfig{Address: "localhost", Port: 0}})
 	fake1 := &fakeCloseTrackingClient{}
@@ -1149,8 +1542,8 @@ func TestClientManagerClose_ClosesClients(t *testing.T) {
 	require.EqualValues(t, 1, fake1.CloseCalls(), "Close should be called on cached client 1")
 	require.EqualValues(t, 1, fake2.CloseCalls(), "Close should be called on cached client 2")
 
+	require.True(t, cm.shutdown.Load())
 	cm.clientMu.RLock()
-	require.True(t, cm.shutdown)
 	require.Empty(t, cm.trillianClients)
 	cm.clientMu.RUnlock()
 
@@ -1280,7 +1673,7 @@ func TestFrozenClient_NoUpdaterStarted(t *testing.T) {
 	).Times(1) // Only called once during ensureStarted; no updater polling
 
 	conn := dialMock(t, s.Addr)
-	frozenCfg := cachedClientConfig{}
+	frozenCfg := Options{}
 	frozenCfg.FrozenTreeIDs = map[int64]struct{}{700: {}}
 	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 700, frozenCfg)
 	t.Cleanup(tc.Close)
@@ -1295,7 +1688,7 @@ func TestFrozenClient_NoUpdaterStarted(t *testing.T) {
 }
 
 func TestFrozenClient_WaitForRootAtLeast_FailsImmediately(t *testing.T) {
-	frozenCfg := cachedClientConfig{}
+	frozenCfg := Options{}
 	frozenCfg.FrozenTreeIDs = map[int64]struct{}{701: {}}
 	tc := newCachedTrillianClient(nil, 701, frozenCfg)
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 5}})
@@ -1351,49 +1744,73 @@ func TestClientManagerFactory_FrozenCachedClient(t *testing.T) {
 // primedClient builds a cachedTrillianClient with started=true and a pre-populated
 // snapshot at the given size, bypassing init so tests can precisely count
 // RPCs without updater noise. No updater goroutine runs; tests that need the
-// fetch-gate to fire should drive it with simulateUpdaterCycle.
+// fetch-gate to fire should drive it with driveUpdaterCycles.
+//
+// The root is stamped as just-fetched. Every cached read path gates on
+// ensureFresh, so an unstamped client would divert into a staleness refresh no
+// mock expects. Tests that want the stale path use staleStartedClient.
 func primedClient(t *testing.T, s *testonly.MockServer, treeID int64, size uint64, rootHash []byte) *cachedTrillianClient {
 	t.Helper()
 	conn := dialMock(t, s.Addr)
-	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), treeID, cachedClientConfig{})
-	tc.v = client.NewLogVerifier(rfc6962.DefaultHasher)
-	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: size, RootHash: rootHash}, signed: mkSLR(t, size, rootHash)})
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), treeID, Options{})
+	tc.storeSnapshot(types.LogRootV1{TreeSize: size, RootHash: rootHash}, mkSLR(t, size, rootHash))
 	tc.started.Store(true)
 	return tc
 }
 
-// simulateUpdaterCycle mimics one updater poll cycle with deterministic
-// timing: Swap-in a fresh gate for the NEXT cycle, optionally publish the
-// given root (if size > 0), then close the PREVIOUS gate. Tests can call this
-// after a reader has captured the current gate to precisely trigger the
-// gate-wake without spinning up a real updater goroutine.
-//
-// Passing size == 0 simulates a no-advance poll (Trillian returned the same
-// size the cache already had): gate still closes so readers wake and retry.
-// Passing size > 0 simulates a successful poll that advances the tree.
-func simulateUpdaterCycle(t *testing.T, tc *cachedTrillianClient, size uint64, rootHash []byte) {
-	t.Helper()
+// updaterCycle mimics one updater poll cycle: Swap in a fresh gate for the NEXT
+// cycle, publish root if non-nil, then close the PREVIOUS gate so readers that
+// captured it wake. A nil root is a no-advance poll — the gate still closes.
+func updaterCycle(tc *cachedTrillianClient, root *types.LogRootV1, signed *trillian.SignedLogRoot) {
 	prev := tc.nextGate.Swap(&fetchGate{done: make(chan struct{})})
-	if size > 0 {
-		lr := types.LogRootV1{TreeSize: size, RootHash: rootHash}
-		b, err := lr.MarshalBinary()
-		require.NoError(t, err)
-		tc.publishRoot(lr, &trillian.SignedLogRoot{LogRoot: b})
+	if root != nil {
+		tc.publishRoot(*root, signed)
 	}
 	close(prev.done)
 }
 
-// waitForGateCapture spins until at least `n` distinct readers have Load()ed
-// the currently-installed nextGate — measured indirectly by observing that
-// the gate has not been Swapped since the initial reference. Since Load() is
-// unobservable, we approximate by watching that a reader has proceeded past
-// its initial cache miss (they'll be blocked in select on the gate). We use a
-// small sleep + heuristic rather than a strict handshake because the reader's
-// Load happens synchronously inside GetLeafAndProofByHash right after the
-// initial getProofByHashWithRoot miss; a few milliseconds is plenty.
-func waitForGateCapture(t *testing.T) {
+// simulateUpdaterCycle runs exactly one cycle publishing the given root (size 0
+// means no advance). Use it only when the reader is already parked on the gate;
+// otherwise use driveUpdaterCycles.
+func simulateUpdaterCycle(t *testing.T, tc *cachedTrillianClient, size uint64, rootHash []byte) {
 	t.Helper()
-	time.Sleep(20 * time.Millisecond)
+	root, signed := cycleRoot(t, size, rootHash)
+	updaterCycle(tc, root, signed)
+}
+
+func cycleRoot(t *testing.T, size uint64, rootHash []byte) (*types.LogRootV1, *trillian.SignedLogRoot) {
+	t.Helper()
+	if size == 0 {
+		return nil, nil
+	}
+	return &types.LogRootV1{TreeSize: size, RootHash: rootHash}, mkSLR(t, size, rootHash)
+}
+
+// driveUpdaterCycles runs updater cycles in the background until the returned
+// stop func is called. This replaces a sleep-based "wait for the reader to
+// capture the gate" barrier: a cycle that runs before the reader's Load is
+// harmless — publishRoot leaves the snapshot untouched for a non-advancing
+// root — so the loop simply repeats until the gate the reader actually
+// captured gets closed.
+func driveUpdaterCycles(t *testing.T, tc *cachedTrillianClient, size uint64, rootHash []byte) (stop func()) {
+	t.Helper()
+	root, signed := cycleRoot(t, size, rootHash)
+	stopped := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			updaterCycle(tc, root, signed)
+			select {
+			case <-stopped:
+				return
+			case <-time.After(2 * time.Millisecond):
+			}
+		}
+	})
+	return func() {
+		close(stopped)
+		wg.Wait()
+	}
 }
 
 func TestReadAfterWrite_ByIndex_InRange_CacheAuthoritative(t *testing.T) {
@@ -1425,9 +1842,59 @@ func TestReadAfterWrite_ByIndex_InRange_CacheAuthoritative(t *testing.T) {
 	require.Equal(t, codes.OK, resp.Status)
 }
 
+// A proof with no leaf is malformed rather than absent, and must not be
+// dereferenced: reading MerkleLeafHash off the nil leaf panics the handler.
+func TestGetLeafAndProofByIndex_ProofWithNilLeaf(t *testing.T) {
+	opt := goleak.IgnoreCurrent()
+	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
+	mockCtl := gomock.NewController(t)
+	defer mockCtl.Finish()
+	s, closeFn, err := testonly.NewMockServer(mockCtl)
+	require.NoError(t, err)
+	defer closeFn()
+
+	tc := primedClient(t, s, 812, 1, make([]byte, 32))
+	t.Cleanup(tc.Close)
+
+	s.Log.EXPECT().GetEntryAndProof(gomock.Any(), gomock.Any()).Return(
+		&trillian.GetEntryAndProofResponse{Proof: &trillian.Proof{LeafIndex: 0}}, nil,
+	).Times(1)
+
+	resp := tc.GetLeafAndProofByIndex(context.Background(), 0)
+	require.Equal(t, codes.Internal, resp.Status)
+	require.ErrorContains(t, resp.Err, "no leaf")
+}
+
+// A proof for a different leaf than the one requested verifies fine on its own
+// terms — it is a genuine proof, just for the wrong entry. Only comparing it
+// against the requested index catches the substitution.
+func TestGetLeafAndProofByIndex_ProofForWrongIndex(t *testing.T) {
+	opt := goleak.IgnoreCurrent()
+	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
+	mockCtl := gomock.NewController(t)
+	defer mockCtl.Finish()
+	s, closeFn, err := testonly.NewMockServer(mockCtl)
+	require.NoError(t, err)
+	defer closeFn()
+
+	tc := primedClient(t, s, 813, 5, make([]byte, 32))
+	t.Cleanup(tc.Close)
+
+	s.Log.EXPECT().GetEntryAndProof(gomock.Any(), gomock.Any()).Return(
+		&trillian.GetEntryAndProofResponse{
+			Leaf:  &trillian.LogLeaf{MerkleLeafHash: bytes.Repeat([]byte{0x66}, 32)},
+			Proof: &trillian.Proof{LeafIndex: 3},
+		}, nil,
+	).Times(1)
+
+	resp := tc.GetLeafAndProofByIndex(context.Background(), 0)
+	require.Equal(t, codes.Internal, resp.Status)
+	require.ErrorContains(t, resp.Err, "index 0 was requested")
+}
+
 func TestReadAfterWrite_ByIndex_OutOfRange_GateAdvanceThenSucceeds(t *testing.T) {
-	// Cache says empty; reader captures the gate. A simulated updater cycle
-	// publishes size=1 with the target root and closes the gate. Reader wakes,
+	// Cache says empty; reader captures the gate. Background updater cycles
+	// publish size=1 with the target root and close the gate. Reader wakes,
 	// re-checks cache — now at size 1 — and serves the entry.
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
@@ -1441,7 +1908,7 @@ func TestReadAfterWrite_ByIndex_OutOfRange_GateAdvanceThenSucceeds(t *testing.T)
 	tc := primedClient(t, s, 801, 0, make([]byte, 32))
 	t.Cleanup(tc.Close)
 
-	// Only GetEntryAndProof — the "root RPC" is replaced by simulateUpdaterCycle.
+	// Only GetEntryAndProof — the "root RPC" is replaced by driveUpdaterCycles.
 	s.Log.EXPECT().GetEntryAndProof(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, r *trillian.GetEntryAndProofRequest) (*trillian.GetEntryAndProofResponse, error) {
 			require.EqualValues(t, 1, r.TreeSize, "retry must use post-gate tree size")
@@ -1456,15 +1923,14 @@ func TestReadAfterWrite_ByIndex_OutOfRange_GateAdvanceThenSucceeds(t *testing.T)
 	go func() {
 		done <- tc.GetLeafAndProofByIndex(context.Background(), 0)
 	}()
-	waitForGateCapture(t)
-	simulateUpdaterCycle(t, tc, 1, newHash)
+	defer driveUpdaterCycles(t, tc, 1, newHash)()
 
 	select {
 	case resp := <-done:
 		require.NoError(t, resp.Err)
 		require.Equal(t, codes.OK, resp.Status)
 	case <-time.After(2 * time.Second):
-		t.Fatal("reader did not complete after simulated updater cycle")
+		t.Fatal("reader did not complete after updater cycles")
 	}
 }
 
@@ -1489,15 +1955,14 @@ func TestReadAfterWrite_ByIndex_OutOfRange_GateAdvancesButIndexStillOut_NotFound
 	go func() {
 		done <- tc.GetLeafAndProofByIndex(context.Background(), 100)
 	}()
-	waitForGateCapture(t)
-	simulateUpdaterCycle(t, tc, 10, bytes.Repeat([]byte{0x22}, 32))
+	defer driveUpdaterCycles(t, tc, 10, bytes.Repeat([]byte{0x22}, 32))()
 
 	select {
 	case resp := <-done:
 		require.Error(t, resp.Err)
 		require.Equal(t, codes.NotFound, resp.Status)
 	case <-time.After(2 * time.Second):
-		t.Fatal("reader did not complete after simulated updater cycle")
+		t.Fatal("reader did not complete after updater cycles")
 	}
 }
 
@@ -1506,7 +1971,7 @@ func TestReadAfterWrite_ByIndex_NegativeInvalidArg(t *testing.T) {
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
 	// No mock server, no client conn — negative check must reject BEFORE
 	// ensureStarted, so no init RPC is triggered.
-	tc := newCachedTrillianClient(nil, 803, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 803, Options{})
 	t.Cleanup(tc.Close)
 
 	resp := tc.GetLeafAndProofByIndex(context.Background(), -1)
@@ -1517,8 +1982,8 @@ func TestReadAfterWrite_ByIndex_NegativeInvalidArg(t *testing.T) {
 func TestReadAfterWrite_ByHash_MissWaitsForGateThenSucceeds(t *testing.T) {
 	// Cache says empty; reader's initial proof attempt short-circuits inside
 	// getProofByHashWithRoot on TreeSize==0 and returns NotFound (no RPC).
-	// Reader captures the fetch-gate. A simulated updater cycle publishes
-	// size=1 with the target hash and closes the gate. Reader wakes, retries
+	// Reader captures the fetch-gate. Background updater cycles publish
+	// size=1 with the target hash and close the gate. Reader wakes, retries
 	// getProofByHashWithRoot against size=1, gets the trivial proof, then
 	// fetches the leaf via getStandaloneLeaf.
 	opt := goleak.IgnoreCurrent()
@@ -1550,24 +2015,24 @@ func TestReadAfterWrite_ByHash_MissWaitsForGateThenSucceeds(t *testing.T) {
 	go func() {
 		done <- tc.GetLeafAndProofByHash(context.Background(), newHash)
 	}()
-	waitForGateCapture(t)
-	simulateUpdaterCycle(t, tc, 1, newHash)
+	defer driveUpdaterCycles(t, tc, 1, newHash)()
 
 	select {
 	case resp := <-done:
 		require.NoError(t, resp.Err)
 		require.Equal(t, codes.OK, resp.Status)
 	case <-time.After(2 * time.Second):
-		t.Fatal("reader did not complete after simulated updater cycle")
+		t.Fatal("reader did not complete after updater cycles")
 	}
 }
 
-func TestReadAfterWrite_ByHash_GateFiresButHashStillMissing_NotFound(t *testing.T) {
-	// First proof call at cached size 1: NotFound. Reader captures gate. A
-	// simulated updater cycle keeps the tree at size 1 (no advance) but still
-	// closes the gate — matching a real "same-size poll" that must not strand
-	// waiters. Reader wakes, retries proof at size 1, misses again, returns
-	// NotFound. Two proof RPCs total; no infinite loop.
+func TestReadAfterWrite_ByHash_GateFiresWithoutAdvance_NotFoundWithoutRetry(t *testing.T) {
+	// First proof call at cached size 1: NotFound. Reader captures the gate. The
+	// updater cycles keep the tree at size 1 but still close the gate — a real
+	// "same-size poll", which must not strand waiters. The reader wakes, sees
+	// the tree did not move, and returns the miss it already has: a second query
+	// at the same size is answered from the same leaf set and cannot differ.
+	// One proof RPC, and no loop.
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
 	mockCtl := gomock.NewController(t)
@@ -1586,26 +2051,24 @@ func TestReadAfterWrite_ByHash_GateFiresButHashStillMissing_NotFound(t *testing.
 			proofCalls.Add(1)
 			return nil, status.Error(codes.NotFound, "no such leaf")
 		},
-	).Times(2)
+	).Times(1)
 
 	unknownHash := bytes.Repeat([]byte{0x55}, 32)
 	done := make(chan *internalclient.Response, 1)
 	go func() {
 		done <- tc.GetLeafAndProofByHash(context.Background(), unknownHash)
 	}()
-	waitForGateCapture(t)
-	// No-advance cycle: publishRoot would drop the size=1 same-hash "advance"
-	// as a no-op, but the gate still closes. Pass size 0 to skip publishRoot
-	// entirely (equivalent semantic: gate closes without snapshot change).
-	simulateUpdaterCycle(t, tc, 0, nil)
+	// No-advance cycles: the gate still closes, so the reader wakes. Size 0
+	// skips publishRoot entirely.
+	defer driveUpdaterCycles(t, tc, 0, nil)()
 
 	select {
 	case resp := <-done:
 		require.Error(t, resp.Err)
 		require.Equal(t, codes.NotFound, resp.Status)
-		require.EqualValues(t, 2, proofCalls.Load(), "must retry exactly once, not loop")
+		require.EqualValues(t, 1, proofCalls.Load(), "an unchanged tree cannot answer differently; the retry is pure waste")
 	case <-time.After(2 * time.Second):
-		t.Fatal("reader did not complete after simulated updater cycle")
+		t.Fatal("reader did not complete after updater cycles")
 	}
 }
 
@@ -1614,7 +2077,7 @@ func TestPublishRoot_MonotonicAgainstDelayedPollerResponse(t *testing.T) {
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
 	// No RPCs — publishRoot exercised directly to verify monotonic guard
 	// against out-of-order publishes from concurrent updater+refresh.
-	tc := newCachedTrillianClient(nil, 860, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 860, Options{})
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}, signed: mkSLR(t, 0, make([]byte, 32))})
 	tc.started.Store(true)
 	t.Cleanup(tc.Close)
@@ -1639,7 +2102,11 @@ func TestPublishRoot_MonotonicAgainstDelayedPollerResponse(t *testing.T) {
 		t.Fatal("waiter for size 10 was not released after size-10 publish")
 	}
 
-	// Delayed "poller" tries to publish size 5 — must be dropped.
+	// Delayed "poller" tries to publish size 5 — the snapshot must not regress.
+	// An updater poll and an on-demand refresh can be in flight at once and
+	// complete out of order, so a late response can carry an older size than one
+	// already published. The fetch is still stamped: it is evidence the log is
+	// alive even though it is not evidence of a new tree state.
 	require.False(t, tc.publishRoot(types.LogRootV1{TreeSize: 5, RootHash: hash5}, mkSLR(t, 5, hash5)))
 
 	snap := tc.snapshot.Load().(rootSnapshot)
@@ -1650,7 +2117,7 @@ func TestPublishRoot_MonotonicAgainstDelayedPollerResponse(t *testing.T) {
 func TestPublishRoot_IntegrityAnomaly_NotPublished(t *testing.T) {
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
-	tc := newCachedTrillianClient(nil, 861, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 861, Options{})
 	origHash := bytes.Repeat([]byte{0xAA}, 32)
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 5, RootHash: origHash}, signed: mkSLR(t, 5, origHash)})
 	tc.started.Store(true)
@@ -1668,7 +2135,7 @@ func TestFetchGate_InitialGateInstalledForActiveTree(t *testing.T) {
 	// newCachedTrillianClient must install an initial gate for non-frozen
 	// trees so a hash reader arriving between ensureStarted and the first
 	// updater cycle has something to wait on.
-	tc := newCachedTrillianClient(nil, 900, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 900, Options{})
 	t.Cleanup(tc.Close)
 
 	gate := tc.nextGate.Load()
@@ -1683,22 +2150,22 @@ func TestFetchGate_InitialGateInstalledForActiveTree(t *testing.T) {
 	}
 }
 
-func TestFetchGate_NoGateForFrozenTree(t *testing.T) {
-	// Frozen trees have no updater to swap or close the gate, so we don't
-	// install one. The hash-lookup path branches out on t.frozen before it
-	// would ever touch nextGate.
-	cfg := cachedClientConfig{FrozenTreeIDs: map[int64]struct{}{901: {}}}
+func TestFetchGate_InstalledEvenForFrozenTree(t *testing.T) {
+	// Frozen trees have no updater to swap or close the gate, and the read
+	// paths branch out on t.frozen before they would touch it. The gate is
+	// still installed so that nextGate is never nil for any caller.
+	cfg := Options{FrozenTreeIDs: map[int64]struct{}{901: {}}}
 	tc := newCachedTrillianClient(nil, 901, cfg)
 	t.Cleanup(tc.Close)
 
-	require.Nil(t, tc.nextGate.Load(), "frozen tree must not install a fetch-gate")
+	require.NotNil(t, tc.nextGate.Load(), "nextGate must never be nil")
 }
 
 func TestFetchGate_SimulateCycle_ClosesPreviousInstallsNext(t *testing.T) {
 	// Direct verification of the Swap-and-close invariant: after one
 	// simulated cycle, the previously-observed gate must be closed and
 	// nextGate must point to a distinct, still-open gate.
-	tc := newCachedTrillianClient(nil, 902, cachedClientConfig{})
+	tc := newCachedTrillianClient(nil, 902, Options{})
 	tc.v = client.NewLogVerifier(rfc6962.DefaultHasher)
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 0}, signed: mkSLR(t, 0, make([]byte, 32))})
 	tc.started.Store(true)
@@ -1746,7 +2213,7 @@ func TestFetchGate_ClosesEvenOnRPCError_ViaRealUpdater(t *testing.T) {
 	).AnyTimes()
 
 	conn := dialMock(t, s.Addr)
-	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 903, cachedClientConfig{
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 903, Options{
 		PollInterval:   10 * time.Millisecond,
 		RootRPCTimeout: 100 * time.Millisecond,
 	})
@@ -1793,9 +2260,9 @@ func TestFetchGate_ShutdownDoesNotCloseGate_ReadersWakeViaBgCtx(t *testing.T) {
 	go func() {
 		done <- tc.GetLeafAndProofByHash(context.Background(), bytes.Repeat([]byte{0xEE}, 32))
 	}()
-	waitForGateCapture(t)
-
-	// Close: bgCancel should wake the reader via bgCtx.Done().
+	// Close: bgCancel wakes the reader via bgCtx.Done(). No barrier is needed —
+	// a reader that reaches the gate after Close sees an already-canceled bgCtx
+	// and takes the same branch.
 	tc.Close()
 
 	select {
@@ -1829,7 +2296,7 @@ func TestFetchGate_FrozenHashMiss_ReturnsNotFoundWithoutGateWait(t *testing.T) {
 	defer closeFn()
 
 	conn := dialMock(t, s.Addr)
-	cfg := cachedClientConfig{FrozenTreeIDs: map[int64]struct{}{905: {}}}
+	cfg := Options{FrozenTreeIDs: map[int64]struct{}{905: {}}}
 	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 905, cfg)
 	tc.v = client.NewLogVerifier(rfc6962.DefaultHasher)
 	tc.snapshot.Store(rootSnapshot{root: types.LogRootV1{TreeSize: 1, RootHash: bytes.Repeat([]byte{0x01}, 32)}, signed: mkSLR(t, 1, bytes.Repeat([]byte{0x01}, 32))})
@@ -1850,11 +2317,12 @@ func TestFetchGate_FrozenHashMiss_ReturnsNotFoundWithoutGateWait(t *testing.T) {
 }
 
 func TestFetchGate_HashMissStorm_OneGateCycleServesAll(t *testing.T) {
-	// N concurrent hash-lookup readers all miss the empty cache. All capture
-	// the same current gate and wait. A single simulated updater cycle
-	// publishes the target and closes the gate; all N readers wake and retry.
-	// Only one gate cycle is needed regardless of N — the fetch-gate primitive
-	// naturally coalesces stale-miss readers onto the shared updater cadence.
+	// N concurrent hash-lookup readers miss the empty cache and park on the
+	// fetch-gate. Updater cycles publish the target and close the gate; every
+	// reader parked on a given gate wakes together and retries. The point is
+	// that no reader issues a root RPC of its own: the fetch-gate coalesces
+	// stale-miss readers onto the shared updater cadence, so the cost of the
+	// storm is bounded by that cadence rather than by N.
 	opt := goleak.IgnoreCurrent()
 	t.Cleanup(func() { goleak.VerifyNone(t, append([]goleak.Option{opt}, grpcDialIgnores...)...) })
 	mockCtl := gomock.NewController(t)
@@ -1890,15 +2358,14 @@ func TestFetchGate_HashMissStorm_OneGateCycleServesAll(t *testing.T) {
 		})
 	}
 
-	waitForGateCapture(t)
-	// One cycle publishes size=1 with newHash and closes the shared gate,
-	// waking all N readers simultaneously.
-	simulateUpdaterCycle(t, tc, 1, newHash)
-
+	// Each cycle publishes size=1 with newHash and closes the gate it replaced,
+	// waking every reader parked on that gate at once.
+	stop := driveUpdaterCycles(t, tc, 1, newHash)
 	wg.Wait()
+	stop()
 	close(errs)
 	for e := range errs {
-		require.NoError(t, e, "all N readers must succeed after the single gate cycle")
+		require.NoError(t, e, "all N readers must succeed once the gate closes")
 	}
 }
 
@@ -1928,7 +2395,7 @@ func TestFetchGate_RealUpdater_WakesReaderAndPublishes(t *testing.T) {
 	).AnyTimes()
 
 	conn := dialMock(t, s.Addr)
-	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 907, cachedClientConfig{
+	tc := newCachedTrillianClient(trillian.NewTrillianLogClient(conn), 907, Options{
 		PollInterval:   30 * time.Millisecond,
 		RootRPCTimeout: time.Second,
 	})
