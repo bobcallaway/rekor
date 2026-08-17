@@ -55,15 +55,34 @@ type ClientManager struct {
 	treeIDToConfig map[int64]GRPCConfig
 	// defaultConfig is the global fallback configuration.
 	defaultConfig GRPCConfig
+	cache         *CacheConfig
+}
+
+// CacheConfig controls the optional signed-root cache.
+type CacheConfig struct {
+	PollInterval  time.Duration
+	RootTimeout   time.Duration
+	FrozenTreeIDs map[int64]struct{}
 }
 
 // NewClientManager creates a new ClientManager.
 func NewClientManager(treeIDToConfig map[int64]GRPCConfig, defaultConfig GRPCConfig) *ClientManager {
+	return newClientManager(treeIDToConfig, defaultConfig, nil)
+}
+
+// NewCachedClientManager creates a manager whose clients share background root
+// updates. Callers must opt in explicitly; NewClientManager remains direct.
+func NewCachedClientManager(treeIDToConfig map[int64]GRPCConfig, defaultConfig GRPCConfig, cache CacheConfig) *ClientManager {
+	return newClientManager(treeIDToConfig, defaultConfig, &cache)
+}
+
+func newClientManager(treeIDToConfig map[int64]GRPCConfig, defaultConfig GRPCConfig, cache *CacheConfig) *ClientManager {
 	return &ClientManager{
 		connections:     make(map[GRPCConfig]*grpc.ClientConn),
 		treeIDToConfig:  treeIDToConfig,
 		defaultConfig:   defaultConfig,
 		trillianClients: make(map[int64]internalclient.Client),
+		cache:           cache,
 	}
 }
 
@@ -128,7 +147,16 @@ func (cm *ClientManager) GetClient(treeID int64) (internalclient.Client, error) 
 		return c, nil
 	}
 
-	newClient := newDirectTrillianClient(trillian.NewTrillianLogClient(conn), treeID)
+	logClient := trillian.NewTrillianLogClient(conn)
+	var newClient internalclient.Client = newDirectTrillianClient(logClient, treeID)
+	if cm.cache != nil {
+		_, frozen := cm.cache.FrozenTreeIDs[treeID]
+		newClient = newCachedTrillianClient(logClient, treeID, cacheOptions{
+			pollInterval: cm.cache.PollInterval,
+			rootTimeout:  cm.cache.RootTimeout,
+			frozen:       frozen,
+		})
+	}
 	cm.trillianClients[treeID] = newClient
 	return newClient, nil
 }
@@ -224,8 +252,12 @@ func (cm *ClientManager) Close() error {
 	// set shutdown flag to true and clear cache of clients
 	cm.clientMu.Lock()
 	cm.shutdown = true
+	clients := cm.trillianClients
 	cm.trillianClients = make(map[int64]internalclient.Client)
 	cm.clientMu.Unlock()
+	for _, client := range clients {
+		client.Close()
+	}
 
 	cm.connMu.Lock()
 	for cfg, conn := range cm.connections {

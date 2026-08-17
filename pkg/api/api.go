@@ -114,12 +114,23 @@ func NewAPI(treeID int64) (*API, error) {
 	}
 
 	inactiveGRPCConfigs := make(map[int64]trillianclient.GRPCConfig)
+	frozenTreeIDs := make(map[int64]struct{})
 	for _, r := range ranges.GetInactive() {
 		if r.GRPCConfig != nil {
 			inactiveGRPCConfigs[r.TreeID] = *r.GRPCConfig
 		}
+		frozenTreeIDs[r.TreeID] = struct{}{}
 	}
-	tcm := trillianclient.NewClientManager(inactiveGRPCConfigs, defaultGRPCConfig)
+	var tcm *trillianclient.ClientManager
+	if viper.GetBool("trillian_log_server.cache_sth") {
+		tcm = trillianclient.NewCachedClientManager(inactiveGRPCConfigs, defaultGRPCConfig, trillianclient.CacheConfig{
+			PollInterval:  viper.GetDuration("trillian_log_server.sth_poll_interval"),
+			RootTimeout:   viper.GetDuration("trillian_log_server.root_rpc_timeout"),
+			FrozenTreeIDs: frozenTreeIDs,
+		})
+	} else {
+		tcm = trillianclient.NewClientManager(inactiveGRPCConfigs, defaultGRPCConfig)
+	}
 
 	roots, err := ranges.CompleteInitialization(ctx, tcm)
 	if err != nil {
