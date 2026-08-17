@@ -16,9 +16,17 @@
 package trillianclient
 
 import (
+	"context"
+	"net"
+	"strconv"
 	"testing"
+	"time"
 
+	"github.com/golang/mock/gomock"
+	"github.com/google/trillian"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
 )
 
 func TestCleanDialHostname(t *testing.T) {
@@ -55,4 +63,35 @@ func TestCleanDialHostname(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestCachedClientManagerIsExplicit(t *testing.T) {
+	s, _ := newMockLog(t)
+	host, portString, err := net.SplitHostPort(s.Addr)
+	require.NoError(t, err)
+	port, err := strconv.ParseUint(portString, 10, 16)
+	require.NoError(t, err)
+	config := GRPCConfig{Address: host, Port: uint16(port)}
+
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).Return(
+		&trillian.GetLatestSignedLogRootResponse{SignedLogRoot: mkSLR(t, 1, make([]byte, 32))}, nil,
+	).Times(1)
+
+	directManager := NewClientManager(nil, config)
+	direct, err := directManager.GetClient(42)
+	require.NoError(t, err)
+	_, ok := direct.(*directTrillianClient)
+	require.True(t, ok)
+	require.NoError(t, directManager.Close())
+
+	cachedManager := NewCachedClientManager(nil, config, CacheConfig{
+		PollInterval:  time.Hour,
+		FrozenTreeIDs: map[int64]struct{}{42: {}},
+	})
+	cached, err := cachedManager.GetClient(42)
+	require.NoError(t, err)
+	_, ok = cached.(*cachedTrillianClient)
+	require.True(t, ok)
+	require.Equal(t, codes.OK, cached.GetLatest(context.Background()).Status)
+	require.NoError(t, cachedManager.Close())
 }
