@@ -16,13 +16,11 @@
 package trillianclient
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
 	"time"
 
-	"github.com/transparency-dev/merkle/proof"
 	"github.com/transparency-dev/merkle/rfc6962"
 
 	"google.golang.org/grpc/codes"
@@ -212,35 +210,10 @@ func (t *directTrillianClient) GetLeafAndProofByIndex(ctx context.Context, index
 		}
 	}
 
-	resp, err := t.client.GetEntryAndProof(ctx,
-		&trillian.GetEntryAndProofRequest{
-			LogId:     t.logID,
-			LeafIndex: index,
-			TreeSize:  int64(root.TreeSize), //nolint:gosec
-		})
-
-	if resp != nil && resp.Proof != nil {
-		if err := proof.VerifyInclusion(rfc6962.DefaultHasher, uint64(index), root.TreeSize, resp.GetLeaf().MerkleLeafHash, resp.Proof.Hashes, root.RootHash); err != nil { //nolint:gosec
-			return &internalclient.Response{
-				Status: status.Code(err),
-				Err:    err,
-			}
-		}
-		return &internalclient.Response{
-			Status: status.Code(err),
-			Err:    err,
-			GetLeafAndProofResult: &trillian.GetEntryAndProofResponse{
-				Proof:         resp.Proof,
-				Leaf:          resp.Leaf,
-				SignedLogRoot: rootResp.GetLatestResult.SignedLogRoot,
-			},
-		}
-	}
-
-	return &internalclient.Response{
-		Status: status.Code(err),
-		Err:    err,
-	}
+	return getEntryAndProof(ctx, t.client, client.NewLogVerifier(rfc6962.DefaultHasher), t.logID, index, rootSnapshot{
+		root:   root,
+		signed: rootResp.GetLatestResult.SignedLogRoot,
+	})
 }
 
 func (t *directTrillianClient) GetLatest(ctx context.Context) *internalclient.Response {
@@ -287,46 +260,10 @@ func (t *directTrillianClient) getProofByHash(ctx context.Context, hashValue []b
 		}
 	}
 
-	// issue 1308: if the tree is empty, there's no way we can return a proof
-	if root.TreeSize == 0 {
-		return &internalclient.Response{
-			Status: codes.NotFound,
-			Err:    status.Error(codes.NotFound, "tree is empty"),
-		}
-	}
-
-	resp, err := t.client.GetInclusionProofByHash(ctx,
-		&trillian.GetInclusionProofByHashRequest{
-			LogId:    t.logID,
-			LeafHash: hashValue,
-			TreeSize: int64(root.TreeSize), //nolint:gosec
-		})
-
-	if resp != nil {
-		v := client.NewLogVerifier(rfc6962.DefaultHasher)
-		for _, proof := range resp.Proof {
-			if err := v.VerifyInclusionByHash(&root, hashValue, proof); err != nil {
-				return &internalclient.Response{
-					Status: status.Code(err),
-					Err:    err,
-				}
-			}
-		}
-		// Return an inclusion proof response with the requested
-		return &internalclient.Response{
-			Status: status.Code(err),
-			Err:    err,
-			GetProofResult: &trillian.GetInclusionProofByHashResponse{
-				Proof:         resp.Proof,
-				SignedLogRoot: rootResp.GetLatestResult.SignedLogRoot,
-			},
-		}
-	}
-
-	return &internalclient.Response{
-		Status: status.Code(err),
-		Err:    err,
-	}
+	return getProofByHash(ctx, t.client, client.NewLogVerifier(rfc6962.DefaultHasher), t.logID, hashValue, rootSnapshot{
+		root:   root,
+		signed: rootResp.GetLatestResult.SignedLogRoot,
+	})
 }
 
 // GetLeavesByRange fetches leaves from startIndex (inclusive) up to count leaves without proofs.
@@ -353,46 +290,5 @@ func (t *directTrillianClient) Close() {}
 
 // getStandaloneLeaf gets just the leaf, returns it in GetLeafAndProof result for easier reuse
 func (t *directTrillianClient) getStandaloneLeaf(ctx context.Context, index int64, hash []byte, proof *trillian.Proof, signedRoot *trillian.SignedLogRoot) *internalclient.Response {
-	leafOnlyResp := t.GetLeafWithoutProof(ctx, index)
-	if leafOnlyResp.Err != nil {
-		return &internalclient.Response{
-			Status: status.Code(leafOnlyResp.Err),
-			Err:    leafOnlyResp.Err,
-		}
-	}
-
-	if leafOnlyResp.GetLeavesByRangeResult == nil || len(leafOnlyResp.GetLeavesByRangeResult.Leaves) == 0 {
-		err := fmt.Errorf("no leaf returned for index %d", index)
-		return &internalclient.Response{
-			Status: codes.NotFound,
-			Err:    err,
-		}
-	}
-	// shouldn't happen since we're using a log mode that prevents duplicates
-	if len(leafOnlyResp.GetLeavesByRangeResult.Leaves) != 1 {
-		err := fmt.Errorf("multiple leaves returned for index %d", index)
-		return &internalclient.Response{
-			Status: codes.FailedPrecondition,
-			Err:    err,
-		}
-	}
-	leaf := leafOnlyResp.GetLeavesByRangeResult.Leaves[0]
-
-	if !bytes.Equal(leaf.MerkleLeafHash, hash) {
-		// extremely unlikely but this means the index in the proof doesn't match the content stored in the index
-		err := fmt.Errorf("leaf hash mismatch: expected %v, got %v", hex.EncodeToString(hash), hex.EncodeToString(leaf.MerkleLeafHash))
-		return &internalclient.Response{
-			Status: status.Code(err),
-			Err:    err,
-		}
-	}
-
-	return &internalclient.Response{
-		Status: codes.OK,
-		GetLeafAndProofResult: &trillian.GetEntryAndProofResponse{
-			Proof:         proof,
-			Leaf:          leaf,
-			SignedLogRoot: signedRoot,
-		},
-	}
+	return getLeafForProof(ctx, t.client, t.logID, index, hash, proof, signedRoot)
 }
