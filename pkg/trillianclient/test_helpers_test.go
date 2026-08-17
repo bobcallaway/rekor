@@ -16,11 +16,14 @@
 package trillianclient
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/google/trillian"
 	"github.com/google/trillian/types"
 	"github.com/stretchr/testify/require"
+	"github.com/transparency-dev/merkle/rfc6962"
+	inmemory "github.com/transparency-dev/merkle/testonly"
 	"go.uber.org/goleak"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -49,6 +52,43 @@ func mkSLR(t *testing.T, size uint64, rootHash []byte) *trillian.SignedLogRoot {
 	b, err := lr.MarshalBinary()
 	require.NoError(t, err)
 	return &trillian.SignedLogRoot{LogRoot: b}
+}
+
+type logTree struct {
+	t    *testing.T
+	tree *inmemory.Tree
+}
+
+func newLogTree(t *testing.T, size uint64) *logTree {
+	t.Helper()
+	tree := inmemory.New(rfc6962.DefaultHasher)
+	for i := range size {
+		tree.AppendData(fmt.Appendf(nil, "leaf-%d", i))
+	}
+	return &logTree{t: t, tree: tree}
+}
+
+func (t *logTree) root(size uint64) []byte {
+	return t.tree.HashAt(size)
+}
+
+func (t *logTree) leafHash(index uint64) []byte {
+	return t.tree.LeafHash(index)
+}
+
+func (t *logTree) inclusion(index, size uint64) [][]byte {
+	proof, err := t.tree.InclusionProof(index, size)
+	require.NoError(t.t, err)
+	return proof
+}
+
+func (t *logTree) response(from, to uint64) *trillian.GetLatestSignedLogRootResponse {
+	proof, err := t.tree.ConsistencyProof(from, to)
+	require.NoError(t.t, err)
+	return &trillian.GetLatestSignedLogRootResponse{
+		SignedLogRoot: mkSLR(t.t, to, t.root(to)),
+		Proof:         &trillian.Proof{Hashes: proof},
+	}
 }
 
 // dialMock dials the given address with insecure credentials and registers a
