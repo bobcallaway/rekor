@@ -17,6 +17,7 @@ package trillianclient
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/google/trillian"
 	"github.com/google/trillian/testonly"
 	"github.com/google/trillian/types"
+	internalclient "github.com/sigstore/rekor/internal/trillianclient"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -123,4 +125,74 @@ func TestCachedClientCloseUnblocksInitialization(t *testing.T) {
 		t.Fatal("GetLatest remained blocked after Close")
 	}
 	tc.Close()
+}
+
+func TestCachedHashMissesShareTheNextRootPoll(t *testing.T) {
+	const callers = 16
+	tree := newLogTree(t, 1)
+	s, logClient := newMockLog(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).Return(tree.response(0, 1), nil).Times(1)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).Return(tree.response(1, 1), nil).Times(1)
+
+	allMissed := make(chan struct{})
+	var misses atomic.Int32
+	s.Log.EXPECT().GetInclusionProofByHash(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(context.Context, *trillian.GetInclusionProofByHashRequest) (*trillian.GetInclusionProofByHashResponse, error) {
+			if misses.Add(1) == callers {
+				close(allMissed)
+			}
+			return nil, status.Error(codes.NotFound, "not found")
+		},
+	).Times(callers)
+
+	tc := newCachedTrillianClient(logClient, 42, cacheOptions{pollInterval: time.Hour})
+	t.Cleanup(tc.Close)
+	require.Equal(t, codes.OK, tc.GetLatest(context.Background()).Status)
+
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			resp := tc.GetLeafAndProofByHash(context.Background(), []byte("missing"))
+			require.Equal(t, codes.NotFound, resp.Status)
+		}()
+	}
+	<-allMissed
+	require.NoError(t, tc.poll())
+	wg.Wait()
+}
+
+func TestCachedAddWaitsForSharedRootAdvance(t *testing.T) {
+	tree := newLogTree(t, 1)
+	hash := tree.leafHash(0)
+	s, logClient := newMockLog(t)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).Return(tree.response(0, 0), nil).Times(1)
+	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).Return(tree.response(0, 1), nil).Times(1)
+
+	queued := make(chan struct{})
+	s.Log.EXPECT().QueueLeaf(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(context.Context, *trillian.QueueLeafRequest) (*trillian.QueueLeafResponse, error) {
+			close(queued)
+			return &trillian.QueueLeafResponse{QueuedLeaf: &trillian.QueuedLogLeaf{Leaf: &trillian.LogLeaf{MerkleLeafHash: hash}}}, nil
+		},
+	).Times(1)
+	s.Log.EXPECT().GetInclusionProofByHash(gomock.Any(), gomock.Any()).Return(
+		&trillian.GetInclusionProofByHashResponse{Proof: []*trillian.Proof{{LeafIndex: 0, Hashes: tree.inclusion(0, 1)}}}, nil,
+	).Times(1)
+	s.Log.EXPECT().GetLeavesByRange(gomock.Any(), gomock.Any()).Return(
+		&trillian.GetLeavesByRangeResponse{Leaves: []*trillian.LogLeaf{{LeafIndex: 0, MerkleLeafHash: hash}}}, nil,
+	).Times(1)
+
+	tc := newCachedTrillianClient(logClient, 42, cacheOptions{pollInterval: time.Hour})
+	t.Cleanup(tc.Close)
+	require.Equal(t, codes.OK, tc.GetLatest(context.Background()).Status)
+
+	done := make(chan *internalclient.Response, 1)
+	go func() { done <- tc.AddLeaf(context.Background(), []byte("leaf-0")) }()
+	<-queued
+	require.NoError(t, tc.poll())
+	resp := <-done
+	require.Equal(t, codes.OK, resp.Status)
+	require.NotNil(t, resp.GetLeafAndProofResult)
 }

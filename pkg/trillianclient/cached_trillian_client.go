@@ -45,6 +45,11 @@ type cacheOptions struct {
 	frozen       bool
 }
 
+type pollResult struct {
+	done chan struct{}
+	err  error
+}
+
 func (o cacheOptions) withDefaults() cacheOptions {
 	if o.pollInterval <= 0 {
 		o.pollInterval = DefaultPollInterval
@@ -69,10 +74,11 @@ type cachedTrillianClient struct {
 	snapshot    atomic.Pointer[rootSnapshot]
 	lastSuccess atomic.Int64
 
-	mu      sync.Mutex
-	changed chan struct{}
-	polled  chan struct{}
-	pollErr error
+	mu       sync.Mutex
+	changed  chan struct{}
+	polled   chan struct{}
+	pollErr  error
+	nextPoll *pollResult
 
 	stop    context.CancelFunc
 	stopped context.Context
@@ -87,6 +93,7 @@ func newCachedTrillianClient(c trillian.TrillianLogClient, logID int64, opts cac
 		opts:                 opts.withDefaults(),
 		changed:              make(chan struct{}),
 		polled:               make(chan struct{}),
+		nextPoll:             &pollResult{done: make(chan struct{})},
 		stop:                 cancel,
 		stopped:              ctx,
 	}
@@ -191,17 +198,7 @@ func (t *cachedTrillianClient) update() {
 	defer ticker.Stop()
 
 	for {
-		snap, err := t.fetchRoot(t.stopped)
-		if err == nil {
-			_, err = t.publish(snap)
-		}
-
-		t.mu.Lock()
-		t.pollErr = err
-		close(t.polled)
-		t.polled = make(chan struct{})
-		t.mu.Unlock()
-
+		err := t.poll()
 		if err != nil && t.stopped.Err() == nil {
 			log.Logger.Debugw("failed to update cached Trillian root", "treeID", t.logID, "err", err)
 		}
@@ -215,6 +212,27 @@ func (t *cachedTrillianClient) update() {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (t *cachedTrillianClient) poll() error {
+	t.mu.Lock()
+	result := t.nextPoll
+	t.nextPoll = &pollResult{done: make(chan struct{})}
+	t.mu.Unlock()
+
+	snap, err := t.fetchRoot(t.stopped)
+	if err == nil {
+		_, err = t.publish(snap)
+	}
+
+	t.mu.Lock()
+	t.pollErr = err
+	result.err = err
+	close(t.polled)
+	close(result.done)
+	t.polled = make(chan struct{})
+	t.mu.Unlock()
+	return err
 }
 
 func (t *cachedTrillianClient) current(ctx context.Context) (rootSnapshot, error) {
