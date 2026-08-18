@@ -31,35 +31,40 @@ func responseError(err error) *internalclient.Response {
 }
 
 func (t *cachedTrillianClient) waitForSize(ctx context.Context, size uint64) error {
-	for {
-		snap, err := t.current(ctx)
-		if err != nil {
-			return err
-		}
-		if snap.root.TreeSize >= size {
-			return nil
-		}
-		if t.opts.frozen {
-			return status.Errorf(codes.NotFound, "tree has size %d, want at least %d", snap.root.TreeSize, size)
-		}
+	snap, err := t.current(ctx)
+	if err != nil {
+		return err
+	}
+	if snap.root.TreeSize >= size {
+		return nil
+	}
+	if t.opts.frozen {
+		return status.Errorf(codes.NotFound, "tree has size %d, want at least %d", snap.root.TreeSize, size)
+	}
 
-		t.mu.Lock()
-		// publish and changed are updated under the same lock. Recheck here so
-		// an advance between current and Lock cannot be missed.
-		if snap := t.snapshot.Load(); snap != nil && snap.root.TreeSize >= size {
-			t.mu.Unlock()
-			return nil
-		}
-		changed, polled := t.changed, t.polled
+	t.mu.Lock()
+	// publish updates the snapshot and heap under this lock. Recheck so an
+	// advance between current and Lock cannot be missed.
+	if snap := t.snapshot.Load(); snap != nil && snap.root.TreeSize >= size {
 		t.mu.Unlock()
-		select {
-		case <-changed:
-		case <-polled:
-		case <-ctx.Done():
-			return status.FromContextError(ctx.Err()).Err()
-		case <-t.stopped.Done():
-			return status.Error(codes.Canceled, "trillian client closed")
-		}
+		return nil
+	}
+	w := t.addSizeWaiter(size)
+	t.mu.Unlock()
+
+	select {
+	case <-w.done:
+		return nil
+	case <-ctx.Done():
+		t.mu.Lock()
+		t.removeSizeWaiter(w)
+		t.mu.Unlock()
+		return status.FromContextError(ctx.Err()).Err()
+	case <-t.stopped.Done():
+		t.mu.Lock()
+		t.removeSizeWaiter(w)
+		t.mu.Unlock()
+		return status.Error(codes.Canceled, "trillian client closed")
 	}
 }
 

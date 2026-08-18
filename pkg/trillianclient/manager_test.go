@@ -69,6 +69,9 @@ func TestCachedClientManagerIsExplicit(t *testing.T) {
 	s, _ := newMockLog(t)
 	host, portString, err := net.SplitHostPort(s.Addr)
 	require.NoError(t, err)
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		host = "localhost"
+	}
 	port, err := strconv.ParseUint(portString, 10, 16)
 	require.NoError(t, err)
 	config := GRPCConfig{Address: host, Port: uint16(port)}
