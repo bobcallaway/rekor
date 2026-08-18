@@ -75,10 +75,10 @@ type cachedTrillianClient struct {
 	lastSuccess atomic.Int64
 
 	mu       sync.Mutex
-	changed  chan struct{}
 	polled   chan struct{}
 	pollErr  error
 	nextPoll *pollResult
+	waiters  sizeWaiters
 
 	stop    context.CancelFunc
 	stopped context.Context
@@ -91,7 +91,6 @@ func newCachedTrillianClient(c trillian.TrillianLogClient, logID int64, opts cac
 		directTrillianClient: newDirectTrillianClient(c, logID),
 		verifier:             client.NewLogVerifier(rfc6962.DefaultHasher),
 		opts:                 opts.withDefaults(),
-		changed:              make(chan struct{}),
 		polled:               make(chan struct{}),
 		nextPoll:             &pollResult{done: make(chan struct{})},
 		stop:                 cancel,
@@ -163,8 +162,7 @@ func (t *cachedTrillianClient) fetchRoot(ctx context.Context) (rootSnapshot, err
 	return rootSnapshot{root: root, signed: resp.SignedLogRoot}, nil
 }
 
-// publish installs a newer snapshot. The changed channel is a generation
-// signal: waiters wake on every advance and check the size again.
+// publish installs a newer snapshot and wakes only waiters it satisfies.
 func (t *cachedTrillianClient) publish(next rootSnapshot) (bool, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -187,8 +185,7 @@ func (t *cachedTrillianClient) publish(next rootSnapshot) (bool, error) {
 	copy := next
 	t.snapshot.Store(&copy)
 	t.lastSuccess.Store(time.Now().UnixNano())
-	close(t.changed)
-	t.changed = make(chan struct{})
+	t.notifySizeWaiters(next.root.TreeSize)
 	return true, nil
 }
 

@@ -86,7 +86,6 @@ func TestCachedClientRejectsConflictingRoot(t *testing.T) {
 	defer cancel()
 	tc := &cachedTrillianClient{
 		opts:    cacheOptions{frozen: true}.withDefaults(),
-		changed: make(chan struct{}),
 		polled:  make(chan struct{}),
 		stop:    cancel,
 		stopped: ctx,
@@ -127,40 +126,57 @@ func TestCachedClientCloseUnblocksInitialization(t *testing.T) {
 	tc.Close()
 }
 
-func TestCachedHashMissesShareTheNextRootPoll(t *testing.T) {
+func TestPollResultIsShared(t *testing.T) {
 	const callers = 16
-	tree := newLogTree(t, 1)
-	s, logClient := newMockLog(t)
-	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).Return(tree.response(0, 1), nil).Times(1)
-	s.Log.EXPECT().GetLatestSignedLogRoot(gomock.Any(), gomock.Any()).Return(tree.response(1, 1), nil).Times(1)
-
-	allMissed := make(chan struct{})
-	var misses atomic.Int32
-	s.Log.EXPECT().GetInclusionProofByHash(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(context.Context, *trillian.GetInclusionProofByHashRequest) (*trillian.GetInclusionProofByHashResponse, error) {
-			if misses.Add(1) == callers {
-				close(allMissed)
-			}
-			return nil, status.Error(codes.NotFound, "not found")
-		},
-	).Times(callers)
-
-	tc := newCachedTrillianClient(logClient, 42, cacheOptions{pollInterval: time.Hour})
-	t.Cleanup(tc.Close)
-	require.Equal(t, codes.OK, tc.GetLatest(context.Background()).Status)
+	result := &pollResult{done: make(chan struct{})}
+	tc := &cachedTrillianClient{nextPoll: result, stopped: context.Background()}
 
 	var wg sync.WaitGroup
 	wg.Add(callers)
 	for range callers {
 		go func() {
 			defer wg.Done()
-			resp := tc.GetLeafAndProofByHash(context.Background(), []byte("missing"))
-			require.Equal(t, codes.NotFound, resp.Status)
+			require.NoError(t, tc.waitForPoll(context.Background()))
 		}()
 	}
-	<-allMissed
-	require.NoError(t, tc.poll())
+	close(result.done)
 	wg.Wait()
+}
+
+func TestSizeWaitersWakeInOrder(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	tc := &cachedTrillianClient{
+		opts:    cacheOptions{}.withDefaults(),
+		polled:  make(chan struct{}),
+		stop:    cancel,
+		stopped: ctx,
+	}
+	tc.snapshot.Store(&rootSnapshot{root: types.LogRootV1{TreeSize: 1}})
+	tc.lastSuccess.Store(time.Now().UnixNano())
+
+	wake2 := make(chan error, 1)
+	wake3 := make(chan error, 1)
+	go func() { wake2 <- tc.waitForSize(context.Background(), 2) }()
+	go func() { wake3 <- tc.waitForSize(context.Background(), 3) }()
+	require.Eventually(t, func() bool {
+		tc.mu.Lock()
+		defer tc.mu.Unlock()
+		return len(tc.waiters) == 2
+	}, time.Second, time.Millisecond)
+
+	_, err := tc.publish(rootSnapshot{root: types.LogRootV1{TreeSize: 2}})
+	require.NoError(t, err)
+	require.NoError(t, <-wake2)
+	select {
+	case <-wake3:
+		t.Fatal("waiter for size 3 woke at size 2")
+	default:
+	}
+
+	_, err = tc.publish(rootSnapshot{root: types.LogRootV1{TreeSize: 3}})
+	require.NoError(t, err)
+	require.NoError(t, <-wake3)
+	cancel()
 }
 
 func TestCachedAddWaitsForSharedRootAdvance(t *testing.T) {
