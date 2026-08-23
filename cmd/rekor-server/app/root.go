@@ -99,6 +99,9 @@ func init() {
 	rootCmd.PersistentFlags().Bool("trillian_log_server.cache_sth", false, "cache signed tree heads in process (experimental)")
 	rootCmd.PersistentFlags().Duration("trillian_log_server.sth_poll_interval", trillianclient.DefaultPollInterval, "how often a cached client fetches the latest tree head")
 	rootCmd.PersistentFlags().Duration("trillian_log_server.root_rpc_timeout", trillianclient.DefaultRootTimeout, "timeout for cached-client tree-head RPCs")
+	rootCmd.PersistentFlags().Duration("trillian_log_server.sth_max_age", 0, "maximum cached tree-head age before reads fail; 0 derives a value from polling and RPC timeouts")
+	rootCmd.PersistentFlags().Int("trillian_log_server.max_pending_writes", trillianclient.DefaultMaxPending, "maximum writes per process waiting for Trillian inclusion")
+	rootCmd.PersistentFlags().Int("trillian_log_server.proof_concurrency", trillianclient.DefaultProofConcurrency, "maximum concurrent Trillian proof reads per tree and process")
 
 	rootCmd.PersistentFlags().Uint("publish_frequency", 5, "how often to publish a new checkpoint, in minutes")
 
@@ -114,6 +117,7 @@ func init() {
 Memory and file-based signers should only be used for testing.`)
 	rootCmd.PersistentFlags().Uint("rekor_server.signer.gcpkms.retries", 0, "Number of retries for GCP KMS requests")
 	rootCmd.PersistentFlags().Uint("rekor_server.signer.gcpkms.timeout", 0, "sets the RPC timeout per call for GCP KMS requests in seconds, defaults to 0 (no timeout)")
+	rootCmd.PersistentFlags().Int("rekor_server.checkpoint_cache_entries", api.DefaultCheckpointCacheEntries, "number of recent signed checkpoints retained per process; 0 disables caching")
 	rootCmd.PersistentFlags().String("rekor_server.signer-passwd", "", "Password to decrypt signer private key")
 	rootCmd.PersistentFlags().String("rekor_server.tink_kek_uri", "", "Key encryption key for decrypting Tink keyset. Valid options are [aws-kms://keyname, gcp-kms://keyname]")
 	rootCmd.PersistentFlags().String("rekor_server.tink_keyset_path", "", "Path to encrypted Tink keyset, containing private key to sign log checkpoints")

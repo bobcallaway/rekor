@@ -85,10 +85,11 @@ func TestCachedClientRejectsConflictingRoot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tc := &cachedTrillianClient{
-		opts:    cacheOptions{frozen: true}.withDefaults(),
-		polled:  make(chan struct{}),
-		stop:    cancel,
-		stopped: ctx,
+		opts:     cacheOptions{frozen: true}.withDefaults(),
+		metrics:  newCachedClientMetrics(42),
+		nextPoll: &pollResult{done: make(chan struct{})},
+		stop:     cancel,
+		stopped:  ctx,
 	}
 
 	_, err := tc.publish(rootSnapshot{root: types.LogRootV1{TreeSize: 1, RootHash: []byte("first")}})
@@ -96,6 +97,26 @@ func TestCachedClientRejectsConflictingRoot(t *testing.T) {
 	_, err = tc.publish(rootSnapshot{root: types.LogRootV1{TreeSize: 1, RootHash: []byte("second")}})
 	require.Error(t, err)
 	require.Equal(t, codes.DataLoss, status.Code(err))
+}
+
+func TestCachedClientDoesNotRefreshOnOlderRoot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tc := &cachedTrillianClient{
+		opts:     cacheOptions{}.withDefaults(),
+		metrics:  newCachedClientMetrics(43),
+		nextPoll: &pollResult{done: make(chan struct{})},
+		stop:     cancel,
+		stopped:  ctx,
+	}
+	tc.snapshot.Store(&rootSnapshot{root: types.LogRootV1{TreeSize: 2, RootHash: []byte("newer")}})
+	tc.lastSuccess.Store(123)
+
+	published, err := tc.publish(rootSnapshot{root: types.LogRootV1{TreeSize: 1, RootHash: []byte("older")}})
+	require.NoError(t, err)
+	require.False(t, published)
+	require.EqualValues(t, 123, tc.lastSuccess.Load())
+	require.EqualValues(t, 2, tc.snapshot.Load().root.TreeSize)
 }
 
 func TestCachedClientCloseUnblocksInitialization(t *testing.T) {
@@ -146,13 +167,14 @@ func TestPollResultIsShared(t *testing.T) {
 func TestSizeWaitersWakeInOrder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	tc := &cachedTrillianClient{
-		opts:    cacheOptions{}.withDefaults(),
-		polled:  make(chan struct{}),
-		stop:    cancel,
-		stopped: ctx,
+		opts:     cacheOptions{}.withDefaults(),
+		metrics:  newCachedClientMetrics(42),
+		nextPoll: &pollResult{done: make(chan struct{})},
+		stop:     cancel,
+		stopped:  ctx,
 	}
 	tc.snapshot.Store(&rootSnapshot{root: types.LogRootV1{TreeSize: 1}})
-	tc.lastSuccess.Store(time.Now().UnixNano())
+	tc.lastSuccess.Store(cacheClockNow())
 
 	wake2 := make(chan error, 1)
 	wake3 := make(chan error, 1)
@@ -161,7 +183,7 @@ func TestSizeWaitersWakeInOrder(t *testing.T) {
 	require.Eventually(t, func() bool {
 		tc.mu.Lock()
 		defer tc.mu.Unlock()
-		return len(tc.waiters) == 2
+		return tc.waiters.waiterCount() == 2 && len(tc.waiters.heap) == 2
 	}, time.Second, time.Millisecond)
 
 	_, err := tc.publish(rootSnapshot{root: types.LogRootV1{TreeSize: 2}})
@@ -177,6 +199,73 @@ func TestSizeWaitersWakeInOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, <-wake3)
 	cancel()
+}
+
+func TestSizeWaitersShareTargetBucket(t *testing.T) {
+	var waiters sizeWaiters
+	first := waiters.add(10)
+	second := waiters.add(10)
+	third := waiters.add(20)
+	require.Same(t, first, second)
+	require.NotSame(t, first, third)
+	require.Equal(t, 3, waiters.waiterCount())
+	require.Len(t, waiters.heap, 2)
+
+	waiters.release(first)
+	require.Equal(t, 2, waiters.waiterCount())
+	require.Len(t, waiters.heap, 2)
+	ready := waiters.satisfy(10)
+	require.Equal(t, []*sizeBucket{second}, ready)
+	require.Equal(t, 1, waiters.waiterCount())
+	require.Len(t, waiters.heap, 1)
+}
+
+func TestCachedClientBoundsPendingAndProofWork(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tc := &cachedTrillianClient{
+		metrics: newCachedClientMetrics(44),
+		pending: make(chan struct{}, 1),
+		proofs:  make(chan struct{}, 2),
+		stopped: ctx,
+	}
+
+	require.NoError(t, tc.acquirePending(context.Background()))
+	require.Equal(t, codes.ResourceExhausted, status.Code(tc.acquirePending(context.Background())))
+	tc.releasePending()
+
+	require.NoError(t, tc.acquireProof(context.Background()))
+	require.NoError(t, tc.acquireProof(context.Background()))
+	proofCtx, proofCancel := context.WithCancel(context.Background())
+	proofCancel()
+	require.Equal(t, codes.Canceled, status.Code(tc.acquireProof(proofCtx)))
+	tc.releaseProof()
+	tc.releaseProof()
+}
+
+func TestCachedClientCloseUnblocksSizeWaiters(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	tc := &cachedTrillianClient{
+		opts:     cacheOptions{}.withDefaults(),
+		metrics:  newCachedClientMetrics(45),
+		nextPoll: &pollResult{done: make(chan struct{})},
+		stop:     cancel,
+		stopped:  ctx,
+	}
+	tc.snapshot.Store(&rootSnapshot{root: types.LogRootV1{TreeSize: 1}})
+	tc.lastSuccess.Store(cacheClockNow())
+
+	done := make(chan error, 1)
+	go func() { done <- tc.waitForSize(context.Background(), 2) }()
+	require.Eventually(t, func() bool {
+		tc.mu.Lock()
+		defer tc.mu.Unlock()
+		return tc.waiters.waiterCount() == 1
+	}, time.Second, time.Millisecond)
+
+	tc.Close()
+	require.Equal(t, codes.Canceled, status.Code(<-done))
+	tc.Close()
 }
 
 func TestCachedAddWaitsForSharedRootAdvance(t *testing.T) {

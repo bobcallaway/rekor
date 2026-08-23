@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/trillian"
 	"github.com/google/trillian/client"
+	"github.com/google/trillian/client/backoff"
 	"github.com/google/trillian/types"
 	internalclient "github.com/sigstore/rekor/internal/trillianclient"
 	"github.com/sigstore/rekor/pkg/log"
@@ -34,15 +35,22 @@ import (
 )
 
 const (
-	DefaultPollInterval = 100 * time.Millisecond
-	DefaultRootTimeout  = 3 * time.Second
+	DefaultPollInterval     = 100 * time.Millisecond
+	DefaultRootTimeout      = 3 * time.Second
+	DefaultMaxPending       = 1024
+	DefaultProofConcurrency = 32
+	errorBackoffMax         = 10 * time.Second
 )
 
+var cacheClockStart = time.Now()
+
 type cacheOptions struct {
-	pollInterval time.Duration
-	rootTimeout  time.Duration
-	maxRootAge   time.Duration
-	frozen       bool
+	pollInterval     time.Duration
+	rootTimeout      time.Duration
+	maxRootAge       time.Duration
+	maxPending       int
+	proofConcurrency int
+	frozen           bool
 }
 
 type pollResult struct {
@@ -60,7 +68,17 @@ func (o cacheOptions) withDefaults() cacheOptions {
 	if o.maxRootAge <= 0 {
 		o.maxRootAge = o.rootTimeout + 3*o.pollInterval
 	}
+	if o.maxPending <= 0 {
+		o.maxPending = DefaultMaxPending
+	}
+	if o.proofConcurrency <= 0 {
+		o.proofConcurrency = DefaultProofConcurrency
+	}
 	return o
+}
+
+func cacheClockNow() int64 {
+	return time.Since(cacheClockStart).Nanoseconds()
 }
 
 // cachedTrillianClient retains one verified root and refreshes it in the
@@ -70,15 +88,18 @@ type cachedTrillianClient struct {
 	*directTrillianClient
 	verifier *client.LogVerifier
 	opts     cacheOptions
+	metrics  cachedClientMetrics
 
 	snapshot    atomic.Pointer[rootSnapshot]
 	lastSuccess atomic.Int64
 
+	pollMu   sync.Mutex
 	mu       sync.Mutex
-	polled   chan struct{}
-	pollErr  error
+	inFlight *pollResult
 	nextPoll *pollResult
 	waiters  sizeWaiters
+	pending  chan struct{}
+	proofs   chan struct{}
 
 	stop    context.CancelFunc
 	stopped context.Context
@@ -87,12 +108,15 @@ type cachedTrillianClient struct {
 
 func newCachedTrillianClient(c trillian.TrillianLogClient, logID int64, opts cacheOptions) *cachedTrillianClient {
 	ctx, cancel := context.WithCancel(context.Background())
+	opts = opts.withDefaults()
 	t := &cachedTrillianClient{
 		directTrillianClient: newDirectTrillianClient(c, logID),
 		verifier:             client.NewLogVerifier(rfc6962.DefaultHasher),
-		opts:                 opts.withDefaults(),
-		polled:               make(chan struct{}),
+		opts:                 opts,
+		metrics:              newCachedClientMetrics(logID),
 		nextPoll:             &pollResult{done: make(chan struct{})},
+		pending:              make(chan struct{}, opts.maxPending),
+		proofs:               make(chan struct{}, opts.proofConcurrency),
 		stop:                 cancel,
 		stopped:              ctx,
 	}
@@ -108,18 +132,18 @@ func (t *cachedTrillianClient) ensureRoot(ctx context.Context) error {
 		}
 
 		t.mu.Lock()
-		polled := t.polled
+		result := t.inFlight
+		if result == nil {
+			result = t.nextPoll
+		}
 		t.mu.Unlock()
 		select {
-		case <-polled:
+		case <-result.done:
 			if t.snapshot.Load() != nil {
 				return nil
 			}
-			t.mu.Lock()
-			err := t.pollErr
-			t.mu.Unlock()
-			if err != nil {
-				return err
+			if result.err != nil {
+				return result.err
 			}
 		case <-ctx.Done():
 			return status.FromContextError(ctx.Err()).Err()
@@ -165,36 +189,61 @@ func (t *cachedTrillianClient) fetchRoot(ctx context.Context) (rootSnapshot, err
 // publish installs a newer snapshot and wakes only waiters it satisfies.
 func (t *cachedTrillianClient) publish(next rootSnapshot) (bool, error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	old := t.snapshot.Load()
 	if old != nil {
 		switch {
 		case next.root.TreeSize < old.root.TreeSize:
-			t.lastSuccess.Store(time.Now().UnixNano())
+			t.mu.Unlock()
 			return false, nil
 		case next.root.TreeSize == old.root.TreeSize:
 			if !bytes.Equal(next.root.RootHash, old.root.RootHash) {
+				t.mu.Unlock()
 				return false, status.Errorf(codes.DataLoss, "root hash changed at tree size %d", next.root.TreeSize)
 			}
-			t.lastSuccess.Store(time.Now().UnixNano())
+			t.lastSuccess.Store(cacheClockNow())
+			t.mu.Unlock()
 			return false, nil
 		}
 	}
 
-	copy := next
-	t.snapshot.Store(&copy)
-	t.lastSuccess.Store(time.Now().UnixNano())
-	t.notifySizeWaiters(next.root.TreeSize)
+	snapshotCopy := next
+	t.snapshot.Store(&snapshotCopy)
+	t.lastSuccess.Store(cacheClockNow())
+	ready := t.waiters.satisfy(next.root.TreeSize)
+	t.metrics.rootSize.Set(float64(next.root.TreeSize))
+	t.metrics.waiters.Set(float64(t.waiters.waiterCount()))
+	t.metrics.waiterBuckets.Set(float64(len(t.waiters.heap)))
+	t.mu.Unlock()
+	for _, bucket := range ready {
+		close(bucket.done)
+	}
 	return true, nil
 }
 
 func (t *cachedTrillianClient) update() {
 	defer t.wg.Done()
-	ticker := time.NewTicker(t.opts.pollInterval)
-	defer ticker.Stop()
+	maxBackoff := errorBackoffMax
+	if t.opts.pollInterval > maxBackoff {
+		maxBackoff = t.opts.pollInterval
+	}
+	retry := backoff.Backoff{
+		Min:    t.opts.pollInterval,
+		Max:    maxBackoff,
+		Factor: 2,
+		Jitter: true,
+	}
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 
 	for {
+		select {
+		case <-t.stopped.Done():
+			return
+		case <-timer.C:
+		}
+
+		started := time.Now()
 		err := t.poll()
 		if err != nil && t.stopped.Err() == nil {
 			log.Logger.Debugw("failed to update cached Trillian root", "treeID", t.logID, "err", err)
@@ -202,18 +251,27 @@ func (t *cachedTrillianClient) update() {
 		if err == nil && t.opts.frozen {
 			return
 		}
-
-		select {
-		case <-t.stopped.Done():
-			return
-		case <-ticker.C:
+		var delay time.Duration
+		if err != nil {
+			delay = retry.Duration()
+		} else {
+			retry.Reset()
+			delay = t.opts.pollInterval - time.Since(started)
+			if delay < 0 {
+				delay = 0
+			}
 		}
+		timer.Reset(delay)
 	}
 }
 
 func (t *cachedTrillianClient) poll() error {
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
+
 	t.mu.Lock()
 	result := t.nextPoll
+	t.inFlight = result
 	t.nextPoll = &pollResult{done: make(chan struct{})}
 	t.mu.Unlock()
 
@@ -221,13 +279,18 @@ func (t *cachedTrillianClient) poll() error {
 	if err == nil {
 		_, err = t.publish(snap)
 	}
+	if err == nil {
+		t.metrics.pollSuccess.Inc()
+	} else {
+		t.metrics.pollFailure.Inc()
+	}
 
 	t.mu.Lock()
-	t.pollErr = err
 	result.err = err
-	close(t.polled)
 	close(result.done)
-	t.polled = make(chan struct{})
+	if t.inFlight == result {
+		t.inFlight = nil
+	}
 	t.mu.Unlock()
 	return err
 }
@@ -240,7 +303,7 @@ func (t *cachedTrillianClient) current(ctx context.Context) (rootSnapshot, error
 	if snap == nil {
 		return rootSnapshot{}, status.Error(codes.Unavailable, "signed log root is not initialized")
 	}
-	if !t.opts.frozen && time.Since(time.Unix(0, t.lastSuccess.Load())) > t.opts.maxRootAge {
+	if !t.opts.frozen && time.Duration(cacheClockNow()-t.lastSuccess.Load()) > t.opts.maxRootAge {
 		return rootSnapshot{}, status.Error(codes.Unavailable, "cached signed log root is stale")
 	}
 	return *snap, nil
@@ -262,4 +325,12 @@ func (t *cachedTrillianClient) GetLatest(ctx context.Context) *internalclient.Re
 func (t *cachedTrillianClient) Close() {
 	t.stop()
 	t.wg.Wait()
+	t.mu.Lock()
+	waiters := t.waiters.drain()
+	t.metrics.waiters.Set(0)
+	t.metrics.waiterBuckets.Set(0)
+	t.mu.Unlock()
+	for _, bucket := range waiters {
+		close(bucket.done)
+	}
 }

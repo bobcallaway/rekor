@@ -98,3 +98,20 @@ func TestCachedClientManagerIsExplicit(t *testing.T) {
 	require.Equal(t, codes.OK, cached.GetLatest(context.Background()).Status)
 	require.NoError(t, cachedManager.Close())
 }
+
+func TestClientManagerCopiesConfigurationAndRejectsAfterClose(t *testing.T) {
+	configs := map[int64]GRPCConfig{1: {Address: "first"}}
+	frozen := map[int64]struct{}{1: {}}
+	manager := NewCachedClientManager(configs, GRPCConfig{Address: "default"}, CacheConfig{FrozenTreeIDs: frozen})
+
+	configs[1] = GRPCConfig{Address: "changed"}
+	frozen[2] = struct{}{}
+	require.Equal(t, "first", manager.treeIDToConfig[1].Address)
+	_, found := manager.cache.FrozenTreeIDs[2]
+	require.False(t, found)
+
+	require.NoError(t, manager.Close())
+	require.NoError(t, manager.Close())
+	_, err := manager.GetClient(1)
+	require.ErrorContains(t, err, "shutting down")
+}

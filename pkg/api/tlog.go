@@ -30,7 +30,6 @@ import (
 
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/sigstore/rekor/pkg/generated/restapi/operations/tlog"
-	"github.com/sigstore/rekor/pkg/util"
 )
 
 // GetLogInfoHandler returns the current size of the tree and the STH
@@ -66,7 +65,7 @@ func GetLogInfoHandler(params tlog.GetLogInfoParams) middleware.Responder {
 	hashString := hex.EncodeToString(root.RootHash)
 	treeSize := int64(root.TreeSize) //nolint:gosec
 
-	scBytes, err := util.CreateAndSignCheckpoint(ctx,
+	checkpoint, err := api.checkpointCache.sign(ctx,
 		api.checkpointHostname, api.logRanges.GetActive().TreeID, root.TreeSize, root.RootHash, api.logRanges.GetActive().Signer)
 	if err != nil {
 		return handleRekorAPIError(params, http.StatusInternalServerError, err, sthGenerateError)
@@ -75,7 +74,7 @@ func GetLogInfoHandler(params tlog.GetLogInfoParams) middleware.Responder {
 	logInfo := models.LogInfo{
 		RootHash:       &hashString,
 		TreeSize:       &treeSize,
-		SignedTreeHead: stringPointer(string(scBytes)),
+		SignedTreeHead: stringPointer(checkpoint),
 		TreeID:         stringPointer(fmt.Sprintf("%d", api.ActiveTreeID())),
 		InactiveShards: inactiveShards,
 	}

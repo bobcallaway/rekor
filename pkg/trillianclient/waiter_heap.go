@@ -17,56 +17,117 @@ package trillianclient
 
 import "container/heap"
 
-type sizeWaiter struct {
-	size  uint64
-	done  chan struct{}
-	index int
+// sizeBucket groups every caller waiting for the same tree size. Trillian
+// advances in batches, so target sizes are highly clustered: at 500 QPS and a
+// 100ms sequencing interval, dozens of requests commonly share one bucket.
+// One channel close wakes the whole group.
+type sizeBucket struct {
+	size      uint64
+	done      chan struct{}
+	refs      int
+	heapIndex int
+	active    bool
 }
 
-type sizeWaiters []*sizeWaiter
+type sizeBucketHeap []*sizeBucket
 
-func (h sizeWaiters) Len() int           { return len(h) }
-func (h sizeWaiters) Less(i, j int) bool { return h[i].size < h[j].size }
-func (h sizeWaiters) Swap(i, j int) {
+func (h sizeBucketHeap) Len() int           { return len(h) }
+func (h sizeBucketHeap) Less(i, j int) bool { return h[i].size < h[j].size }
+func (h sizeBucketHeap) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
-	h[i].index = i
-	h[j].index = j
+	h[i].heapIndex = i
+	h[j].heapIndex = j
 }
 
-func (h *sizeWaiters) Push(x any) {
-	w := x.(*sizeWaiter)
-	w.index = len(*h)
-	*h = append(*h, w)
+func (h *sizeBucketHeap) Push(x any) {
+	b := x.(*sizeBucket)
+	b.heapIndex = len(*h)
+	*h = append(*h, b)
 }
 
-func (h *sizeWaiters) Pop() any {
+func (h *sizeBucketHeap) Pop() any {
 	old := *h
 	n := len(old)
-	w := old[n-1]
+	b := old[n-1]
 	old[n-1] = nil
-	w.index = -1
+	b.heapIndex = -1
 	*h = old[:n-1]
-	return w
+	return b
 }
 
-// addSizeWaiter adds a waiter to the heap. t.mu must be held.
-func (t *cachedTrillianClient) addSizeWaiter(size uint64) *sizeWaiter {
-	w := &sizeWaiter{size: size, done: make(chan struct{})}
-	heap.Push(&t.waiters, w)
-	return w
+type sizeWaiters struct {
+	bySize map[uint64]*sizeBucket
+	heap   sizeBucketHeap
+	total  int
 }
 
-// removeSizeWaiter removes a canceled waiter. t.mu must be held.
-func (t *cachedTrillianClient) removeSizeWaiter(w *sizeWaiter) {
-	if w.index >= 0 {
-		heap.Remove(&t.waiters, w.index)
+func (w *sizeWaiters) add(size uint64) *sizeBucket {
+	if w.bySize == nil {
+		w.bySize = make(map[uint64]*sizeBucket)
+	}
+	if b := w.bySize[size]; b != nil {
+		b.refs++
+		w.total++
+		return b
+	}
+	b := &sizeBucket{
+		size:      size,
+		done:      make(chan struct{}),
+		refs:      1,
+		heapIndex: -1,
+		active:    true,
+	}
+	w.bySize[size] = b
+	w.total++
+	heap.Push(&w.heap, b)
+	return b
+}
+
+// release removes one canceled caller. The bucket itself is removed only when
+// its final caller leaves before the requested size is reached.
+func (w *sizeWaiters) release(b *sizeBucket) {
+	if b == nil || !b.active {
+		return
+	}
+	b.refs--
+	w.total--
+	if b.refs > 0 {
+		return
+	}
+	b.active = false
+	delete(w.bySize, b.size)
+	if b.heapIndex >= 0 {
+		heap.Remove(&w.heap, b.heapIndex)
 	}
 }
 
-// notifySizeWaiters wakes only callers satisfied by size. t.mu must be held.
-func (t *cachedTrillianClient) notifySizeWaiters(size uint64) {
-	for len(t.waiters) > 0 && t.waiters[0].size <= size {
-		w := heap.Pop(&t.waiters).(*sizeWaiter)
-		close(w.done)
+// satisfy detaches all buckets reached by size. The caller closes their done
+// channels after releasing its mutex, so waking a large batch does not create
+// lock contention inside the publication critical section.
+func (w *sizeWaiters) satisfy(size uint64) []*sizeBucket {
+	var ready []*sizeBucket
+	for len(w.heap) > 0 && w.heap[0].size <= size {
+		b := heap.Pop(&w.heap).(*sizeBucket)
+		b.active = false
+		delete(w.bySize, b.size)
+		w.total -= b.refs
+		ready = append(ready, b)
 	}
+	return ready
+}
+
+func (w *sizeWaiters) drain() []*sizeBucket {
+	ready := make([]*sizeBucket, 0, len(w.heap))
+	for len(w.heap) > 0 {
+		b := heap.Pop(&w.heap).(*sizeBucket)
+		b.active = false
+		ready = append(ready, b)
+	}
+	clear(w.bySize)
+	w.total = 0
+	return ready
+}
+
+func (w *sizeWaiters) waiterCount() int {
+	return w.total
 }

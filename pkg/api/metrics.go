@@ -68,6 +68,11 @@ var (
 		Help: "Checkpoint publishing by shard and code",
 	}, []string{"shard", "code"})
 
+	checkpointCacheRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "rekor_checkpoint_cache_requests_total",
+		Help: "Checkpoint signature cache outcomes. A miss corresponds to a signer invocation.",
+	}, []string{"outcome"})
+
 	_ = promauto.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Namespace: "rekor",

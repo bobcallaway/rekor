@@ -45,6 +45,7 @@ type API struct {
 	// nil if no publisher is configured.
 	newEntryPublisher pubsub.Publisher
 	algorithmRegistry *signature.AlgorithmRegistryConfig
+	checkpointCache   *checkpointCache
 	// Stores map of inactive tree IDs to checkpoints
 	// Inactive shards will always return the same checkpoint,
 	// so we can fetch the checkpoint on service startup to
@@ -124,9 +125,12 @@ func NewAPI(treeID int64) (*API, error) {
 	var tcm *trillianclient.ClientManager
 	if viper.GetBool("trillian_log_server.cache_sth") {
 		tcm = trillianclient.NewCachedClientManager(inactiveGRPCConfigs, defaultGRPCConfig, trillianclient.CacheConfig{
-			PollInterval:  viper.GetDuration("trillian_log_server.sth_poll_interval"),
-			RootTimeout:   viper.GetDuration("trillian_log_server.root_rpc_timeout"),
-			FrozenTreeIDs: frozenTreeIDs,
+			PollInterval:     viper.GetDuration("trillian_log_server.sth_poll_interval"),
+			RootTimeout:      viper.GetDuration("trillian_log_server.root_rpc_timeout"),
+			MaxRootAge:       viper.GetDuration("trillian_log_server.sth_max_age"),
+			MaxPending:       viper.GetInt("trillian_log_server.max_pending_writes"),
+			ProofConcurrency: viper.GetInt("trillian_log_server.proof_concurrency"),
+			FrozenTreeIDs:    frozenTreeIDs,
 		})
 	} else {
 		tcm = trillianclient.NewClientManager(inactiveGRPCConfigs, defaultGRPCConfig)
@@ -197,6 +201,7 @@ func NewAPI(treeID int64) (*API, error) {
 		// Utility functionality not required for operation of the core service
 		newEntryPublisher:     newEntryPublisher,
 		algorithmRegistry:     algorithmRegistry,
+		checkpointCache:       newCheckpointCache(viper.GetInt("rekor_server.checkpoint_cache_entries")),
 		cachedCheckpoints:     cachedCheckpoints,
 		checkpointHostname:    checkpointHostname,
 		publishEventsProtobuf: publishEventsProtobuf,

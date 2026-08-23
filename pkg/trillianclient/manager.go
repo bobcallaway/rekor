@@ -21,10 +21,12 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/trillian"
@@ -49,7 +51,7 @@ type ClientManager struct {
 	// trillianClients caches the client wrappers.
 	trillianClients map[int64]internalclient.Client
 	// flag to indicate whether the client manager is shutting down
-	shutdown bool
+	shutdown atomic.Bool
 
 	// treeIDToConfig maps a specific tree ID to its gRPC configuration.
 	treeIDToConfig map[int64]GRPCConfig
@@ -60,9 +62,12 @@ type ClientManager struct {
 
 // CacheConfig controls the optional signed-root cache.
 type CacheConfig struct {
-	PollInterval  time.Duration
-	RootTimeout   time.Duration
-	FrozenTreeIDs map[int64]struct{}
+	PollInterval     time.Duration
+	RootTimeout      time.Duration
+	MaxRootAge       time.Duration
+	MaxPending       int
+	ProofConcurrency int
+	FrozenTreeIDs    map[int64]struct{}
 }
 
 // NewClientManager creates a new ClientManager.
@@ -77,17 +82,26 @@ func NewCachedClientManager(treeIDToConfig map[int64]GRPCConfig, defaultConfig G
 }
 
 func newClientManager(treeIDToConfig map[int64]GRPCConfig, defaultConfig GRPCConfig, cache *CacheConfig) *ClientManager {
+	var cacheCopy *CacheConfig
+	if cache != nil {
+		copy := *cache
+		copy.FrozenTreeIDs = maps.Clone(cache.FrozenTreeIDs)
+		cacheCopy = &copy
+	}
 	return &ClientManager{
 		connections:     make(map[GRPCConfig]*grpc.ClientConn),
-		treeIDToConfig:  treeIDToConfig,
+		treeIDToConfig:  maps.Clone(treeIDToConfig),
 		defaultConfig:   defaultConfig,
 		trillianClients: make(map[int64]internalclient.Client),
-		cache:           cache,
+		cache:           cacheCopy,
 	}
 }
 
 // getConn finds the correct gRPC config for a tree ID, then dials or retrieves a cached connection.
 func (cm *ClientManager) getConn(treeID int64) (*grpc.ClientConn, error) {
+	if cm.shutdown.Load() {
+		return nil, errors.New("client manager is shutting down")
+	}
 	// Determine the correct GRPCConfig for this treeID.
 	config, ok := cm.treeIDToConfig[treeID]
 	if !ok {
@@ -104,6 +118,9 @@ func (cm *ClientManager) getConn(treeID int64) (*grpc.ClientConn, error) {
 
 	cm.connMu.Lock()
 	defer cm.connMu.Unlock()
+	if cm.shutdown.Load() {
+		return nil, errors.New("client manager is shutting down")
+	}
 	// Double-check after acquiring the write lock.
 	conn, ok = cm.connections[config]
 	if ok {
@@ -121,14 +138,16 @@ func (cm *ClientManager) getConn(treeID int64) (*grpc.ClientConn, error) {
 
 // GetClient returns a Rekor Trillian client wrapper for the given tree ID.
 func (cm *ClientManager) GetClient(treeID int64) (internalclient.Client, error) {
-	cm.clientMu.RLock()
-	if cm.shutdown {
-		cm.clientMu.RUnlock()
+	if cm.shutdown.Load() {
 		return nil, errors.New("client manager is shutting down")
 	}
+	cm.clientMu.RLock()
 	c, ok := cm.trillianClients[treeID]
 	cm.clientMu.RUnlock()
 	if ok {
+		if cm.shutdown.Load() {
+			return nil, errors.New("client manager is shutting down")
+		}
 		return c, nil
 	}
 
@@ -140,7 +159,7 @@ func (cm *ClientManager) GetClient(treeID int64) (internalclient.Client, error) 
 	cm.clientMu.Lock()
 	defer cm.clientMu.Unlock()
 	// Double-check after acquiring the write lock.
-	if cm.shutdown {
+	if cm.shutdown.Load() {
 		return nil, errors.New("client manager is shutting down")
 	}
 	if c, ok = cm.trillianClients[treeID]; ok {
@@ -152,9 +171,12 @@ func (cm *ClientManager) GetClient(treeID int64) (internalclient.Client, error) 
 	if cm.cache != nil {
 		_, frozen := cm.cache.FrozenTreeIDs[treeID]
 		newClient = newCachedTrillianClient(logClient, treeID, cacheOptions{
-			pollInterval: cm.cache.PollInterval,
-			rootTimeout:  cm.cache.RootTimeout,
-			frozen:       frozen,
+			pollInterval:     cm.cache.PollInterval,
+			rootTimeout:      cm.cache.RootTimeout,
+			maxRootAge:       cm.cache.MaxRootAge,
+			maxPending:       cm.cache.MaxPending,
+			proofConcurrency: cm.cache.ProofConcurrency,
+			frozen:           frozen,
 		})
 	}
 	cm.trillianClients[treeID] = newClient
@@ -247,11 +269,13 @@ func dial(hostname string, port uint16, tlsCACertFile string, useSystemTrustStor
 
 // Close stops clients and closes underlying gRPC connections.
 func (cm *ClientManager) Close() error {
+	if cm.shutdown.Swap(true) {
+		return nil
+	}
 	var err error
 
-	// set shutdown flag to true and clear cache of clients
+	// Clear and stop clients before closing their underlying connections.
 	cm.clientMu.Lock()
-	cm.shutdown = true
 	clients := cm.trillianClients
 	cm.trillianClients = make(map[int64]internalclient.Client)
 	cm.clientMu.Unlock()
