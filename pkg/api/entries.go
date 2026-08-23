@@ -54,7 +54,6 @@ import (
 	"github.com/sigstore/rekor/pkg/tle"
 	"github.com/sigstore/rekor/pkg/types"
 	hashedrekord "github.com/sigstore/rekor/pkg/types/hashedrekord/v0.0.1"
-	"github.com/sigstore/rekor/pkg/util"
 	"github.com/sigstore/sigstore/pkg/signature"
 	"github.com/sigstore/sigstore/pkg/signature/options"
 )
@@ -82,7 +81,7 @@ func signEntry(ctx context.Context, signer signature.Signer, entry models.LogEnt
 // logEntryFromLeaf creates a signed LogEntry struct from trillian structs
 func logEntryFromLeaf(ctx context.Context, leaf *trillian.LogLeaf, signedLogRoot *trillian.SignedLogRoot,
 	proof *trillian.Proof, tid int64, ranges *sharding.LogRanges, cachedCheckpoints map[int64]string,
-	checkpointHostname string) (models.LogEntry, error) {
+	checkpointCache *checkpointCache, checkpointHostname string) (models.LogEntry, error) {
 
 	log.ContextLogger(ctx).Debugf("log entry from leaf %d", leaf.GetLeafIndex())
 	root := &ttypes.LogRootV1{}
@@ -118,11 +117,11 @@ func logEntryFromLeaf(ctx context.Context, leaf *trillian.LogLeaf, signedLogRoot
 	if ok {
 		sc = val
 	} else {
-		scBytes, err := util.CreateAndSignCheckpoint(ctx, checkpointHostname, tid, root.TreeSize, root.RootHash, logRange.Signer)
+		checkpoint, err := checkpointCache.sign(ctx, checkpointHostname, tid, root.TreeSize, root.RootHash, logRange.Signer)
 		if err != nil {
 			return nil, err
 		}
-		sc = string(scBytes)
+		sc = checkpoint
 	}
 
 	inclusionProof := models.InclusionProof{
@@ -419,7 +418,7 @@ func createLogEntry(params entries.CreateLogEntryParams) (models.LogEntry, middl
 		hashes = append(hashes, hex.EncodeToString(hash))
 	}
 
-	scBytes, err := util.CreateAndSignCheckpoint(ctx, api.checkpointHostname, api.ActiveTreeID(), root.TreeSize, root.RootHash, api.logRanges.GetActive().Signer)
+	checkpoint, err := api.checkpointCache.sign(ctx, api.checkpointHostname, api.ActiveTreeID(), root.TreeSize, root.RootHash, api.logRanges.GetActive().Signer)
 	if err != nil {
 		return nil, handleRekorAPIError(params, http.StatusInternalServerError, err, sthGenerateError)
 	}
@@ -429,7 +428,7 @@ func createLogEntry(params entries.CreateLogEntryParams) (models.LogEntry, middl
 		RootHash:   new(hex.EncodeToString(root.RootHash)),
 		LogIndex:   new(queuedLeaf.LeafIndex),
 		Hashes:     hashes,
-		Checkpoint: new(string(scBytes)),
+		Checkpoint: new(checkpoint),
 	}
 
 	logEntryAnon.Verification = &models.LogEntryAnonVerification{
@@ -631,7 +630,7 @@ func SearchLogQueryHandler(params entries.SearchLogQueryParams) middleware.Respo
 				if leafResp == nil {
 					continue
 				}
-				logEntry, err := logEntryFromLeaf(httpReqCtx, leafResp.Leaf, leafResp.SignedLogRoot, leafResp.Proof, shard, api.logRanges, api.cachedCheckpoints, api.checkpointHostname)
+				logEntry, err := logEntryFromLeaf(httpReqCtx, leafResp.Leaf, leafResp.SignedLogRoot, leafResp.Proof, shard, api.logRanges, api.cachedCheckpoints, api.checkpointCache, api.checkpointHostname)
 				if err != nil {
 					return handleRekorAPIError(params, http.StatusInternalServerError, err, trillianUnexpectedResult)
 				}
@@ -679,7 +678,7 @@ func retrieveLogEntryByIndex(ctx context.Context, logIndex int) (models.LogEntry
 		return models.LogEntry{}, ErrNotFound
 	}
 
-	return logEntryFromLeaf(ctx, leaf, result.SignedLogRoot, result.Proof, tid, api.logRanges, api.cachedCheckpoints, api.checkpointHostname)
+	return logEntryFromLeaf(ctx, leaf, result.SignedLogRoot, result.Proof, tid, api.logRanges, api.cachedCheckpoints, api.checkpointCache, api.checkpointHostname)
 }
 
 // Retrieve a Log Entry
@@ -753,7 +752,7 @@ func retrieveUUIDFromTree(ctx context.Context, uuid string, tid int64) (models.L
 			return models.LogEntry{}, resp.Err
 		}
 
-		logEntry, err := logEntryFromLeaf(ctx, result.Leaf, result.SignedLogRoot, result.Proof, tid, api.logRanges, api.cachedCheckpoints, api.checkpointHostname)
+		logEntry, err := logEntryFromLeaf(ctx, result.Leaf, result.SignedLogRoot, result.Proof, tid, api.logRanges, api.cachedCheckpoints, api.checkpointCache, api.checkpointHostname)
 		if err != nil {
 			return models.LogEntry{}, fmt.Errorf("could not create log entry from leaf: %w", err)
 		}
