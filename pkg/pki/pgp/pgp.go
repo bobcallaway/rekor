@@ -42,6 +42,7 @@ import (
 // Signature that follows the PGP standard; supports both armored & binary detached signatures
 type Signature struct {
 	isArmored bool
+	isV3      bool
 	signature []byte
 }
 
@@ -76,18 +77,24 @@ func NewSignature(r io.Reader) (*Signature, error) {
 		sigReader = sigByteReader
 	}
 
-	sigPktReader := packet.NewReader(sigReader)
-	sigPkt, err := sigPktReader.Next()
+	sigBytes, err := io.ReadAll(sigReader)
 	if err != nil {
 		return nil, fmt.Errorf("invalid PGP signature: %w", err)
 	}
 
-	switch sigPkt.(type) {
-	case *packet.Signature, *packet.SignatureV3:
-	default:
-		return nil, errors.New("valid PGP signature was not detected")
+	if err := s.detectV3Signature(sigBytes); err != nil {
+		return nil, fmt.Errorf("invalid PGP signature: %w", err)
 	}
-
+	if !s.isV3 {
+		sigPktReader := packet.NewReader(bytes.NewReader(sigBytes))
+		sigPkt, err := sigPktReader.Next()
+		if err != nil {
+			return nil, fmt.Errorf("invalid PGP signature: %w", err)
+		}
+		if _, ok := sigPkt.(*packet.Signature); !ok {
+			return nil, errors.New("valid PGP signature was not detected")
+		}
+	}
 	s.signature = inputBuffer.Bytes()
 	return &s, nil
 }
@@ -155,6 +162,9 @@ func (s Signature) Verify(r io.Reader, k interface{}, _ ...sigsig.VerifyOption) 
 	if key == nil || len(key.key) == 0 {
 		return errors.New("PGP public key has not been initialized")
 	}
+	if s.isV3 {
+		return s.verifyV3(r, key)
+	}
 
 	sigReader := bytes.NewReader(s.signature)
 	var (
@@ -173,13 +183,8 @@ func (s Signature) Verify(r io.Reader, k interface{}, _ ...sigsig.VerifyOption) 
 	if err != nil {
 		return fmt.Errorf("error reading PGP signature: %w", err)
 	}
-	var creationTime time.Time
-	switch sig := sigPkt.(type) {
-	case *packet.Signature:
-		creationTime = sig.CreationTime
-	case *packet.SignatureV3:
-		creationTime = sig.CreationTime
-	default:
+	sig, ok := sigPkt.(*packet.Signature)
+	if !ok {
 		return errors.New("valid PGP signature was not detected")
 	}
 
@@ -188,7 +193,7 @@ func (s Signature) Verify(r io.Reader, k interface{}, _ ...sigsig.VerifyOption) 
 	// still verify after key expiry, matching prior x/crypto/openpgp behavior
 	// needed for transparency-log replay and existing fixtures.
 	cfg := &packet.Config{
-		Time: func() time.Time { return creationTime },
+		Time: func() time.Time { return sig.CreationTime },
 	}
 	if _, err := sigReader.Seek(0, io.SeekStart); err != nil {
 		return err

@@ -46,7 +46,7 @@ jobs:
       - name: Check license headers
         run: |
           set -e
-          addlicense -l apache -c 'The Sigstore Authors' -v -ignore '**/testdata/**' *
+          addlicense -l apache -c 'The Sigstore Authors' -v -ignore '**/testdata/**' -ignore 'internal/pgpv3/algorithm/**' -ignore 'internal/pgpv3/encoding/**' -ignore 'internal/pgpv3/packet/helpers.go' -ignore 'internal/pgpv3/packet/public_key_v3_verify.go' -ignore 'internal/pgpv3/packet/signature_v3.go' *
           git diff --exit-code
 
   golangci:
