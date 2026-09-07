@@ -5,9 +5,22 @@ You can read more about Sigstore's deprecation policy [here](https://docs.sigsto
 
 | **Feature Being Deprecated**               | **API Stability Level** | **Earliest Date of Removal** |
 |--------------------------------------------|-------------------------|------------------------------|
+| OpenPGP entry and `pkg/pki/pgp` support    | GA                      | Next major release           |
 | Specifying URLs inline in proposed entries | Experimental/Beta/GA    | DD/MM/YY                     |
 | `search_index.mysql.max_open_connections`  | Experimental/Beta/GA    | DD/MM/YY                     |
 | `search_index.mysql.max_idle_connections`  | Experimental/Beta/GA    | DD/MM/YY                     |
+
+## OpenPGP support
+
+OpenPGP support is deprecated. It remains available so existing API consumers
+and historical log entries continue to work, but new integrations should use a
+different supported signature format. Rekor intends to remove the OpenPGP entry
+types and the `pkg/pki/pgp` package in its next major release.
+
+Rekor temporarily retains `golang.org/x/crypto/openpgp` to preserve the public
+Go API exposed before v1.5.4, including the return type of `PublicKey.KeyRing`.
+The compatibility decision and associated security status are recorded in
+`vex.openvex.json`.
 
 ## `search_index.mysql.max_open_connections` and `search_index.mysql.max_idle_connections`
 

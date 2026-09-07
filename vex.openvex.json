@@ -1,0 +1,22 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/sigstore/rekor/security/vex/GO-2026-5932",
+  "author": "The Sigstore Authors",
+  "timestamp": "2026-09-07T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "GO-2026-5932"
+      },
+      "products": [
+        {
+          "@id": "pkg:golang/github.com/sigstore/rekor"
+        }
+      ],
+      "status": "affected",
+      "action_statement": "OpenPGP support is retained temporarily to restore the public API and historical signature compatibility broken in v1.5.4. Do not use it for new integrations. Rekor will remove OpenPGP support in the next major release.",
+      "impact_statement": "Rekor parses and verifies untrusted OpenPGP keys and signatures using the unmaintained golang.org/x/crypto/openpgp package. The risk described by GO-2026-5932 therefore cannot be classified as not affected."
+    }
+  ]
+}

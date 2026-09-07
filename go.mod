@@ -48,7 +48,6 @@ require (
 	cloud.google.com/go/pubsub/v2 v2.7.0
 	github.com/AdamKorcz/go-fuzz-headers-1 v0.0.0-20230919221257-8b5d3ce2d11d
 	github.com/DATA-DOG/go-sqlmock v1.5.2
-	github.com/ProtonMail/go-crypto v1.4.1
 	github.com/cyberphone/json-canonicalization v0.0.0-20220623050100-57a0ce2678a7
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-openapi/swag/cmdutils v0.29.1
@@ -66,8 +65,6 @@ require (
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/redis/go-redis/v9 v9.22.0
-	github.com/sassoftware/go-rpmutils v0.4.0
-	github.com/sassoftware/relic/v8 v8.2.0
 	github.com/sigstore/protobuf-specs v0.5.2
 	github.com/sigstore/sigstore/pkg/signature/kms/aws v1.10.9
 	github.com/sigstore/sigstore/pkg/signature/kms/azure v1.10.9
@@ -95,7 +92,6 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys v1.5.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0 // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.7.2 // indirect
-	github.com/DataDog/zstd v1.5.5 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.33.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.55.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.55.0 // indirect
@@ -119,9 +115,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.45.4 // indirect
 	github.com/aws/smithy-go v1.27.6 // indirect
+	github.com/cavaliercoder/badio v0.0.0-20160213150051-ce5280129e9e // indirect
 	github.com/cavaliergopher/cpio v1.0.1 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
-	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
@@ -162,7 +158,6 @@ require (
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.7.0 // indirect
-	github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.44.0 // indirect
@@ -179,6 +174,7 @@ require (
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260727163830-6c54dddc4772 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	software.sslmate.com/src/go-pkcs12 v0.5.0 // indirect
 )
@@ -189,6 +185,7 @@ require (
 	cloud.google.com/go/kms v1.33.0 // indirect
 	cloud.google.com/go/storage v1.62.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/cavaliercoder/go-rpm v0.0.0-20200122174316-8cb9fd9c31a8
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/common-nighthawk/go-figure v0.0.0-20210622060536-734e95fb86be // indirect
 	github.com/danieljoos/wincred v1.2.2 // indirect
@@ -212,6 +209,8 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
+	github.com/sassoftware/relic v7.2.1+incompatible
+	github.com/sassoftware/relic/v7 v7.6.2
 	github.com/shibumi/go-pathspec v1.3.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
@@ -228,5 +227,3 @@ require (
 	google.golang.org/api v0.292.0
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/ProtonMail/go-crypto => github.com/pgpkeys-eu/go-crypto v1.4.2-0.20260816224830-d2a8cc303a65
