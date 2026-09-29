@@ -116,6 +116,9 @@ services:
       "--attestation_storage_bucket=file:///var/run/attestations",
       "--search_index.storage_provider=mysql",
       "--search_index.mysql.dsn=test:zaphod@tcp(mysql:3306)/test?parseTime=true&interpolateParams=true",
+      # e2e uploads an entry and immediately searches for it; the production coalescing
+      # window is long enough to lose that race, and batching buys nothing at test volume
+      "--search_index.mysql.batch_delay=1ms",
       "--enable_pprof",
       # Uncomment this for production logging
       # "--log_type=prod",

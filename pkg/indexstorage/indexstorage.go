@@ -43,7 +43,8 @@ func NewIndexStorage(providerType string) (IndexStorage, error) {
 			mysql.WithReadMaxIdleConns(limits.readIdle),
 			mysql.WithReadMaxOpenConns(limits.readOpen),
 			mysql.WithWriteMaxIdleConns(limits.writeIdle),
-			mysql.WithWriteMaxOpenConns(limits.writeOpen))
+			mysql.WithWriteMaxOpenConns(limits.writeOpen),
+			mysql.WithBatchDelay(viper.GetDuration("search_index.mysql.batch_delay")))
 	default:
 		return nil, fmt.Errorf("invalid index storage provider type: %v", providerType)
 	}

@@ -17,15 +17,22 @@ package mysql
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/jmoiron/sqlx"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/sigstore/rekor/pkg/log"
 
 	"go.uber.org/goleak"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // newMockDB returns a sqlx handle over a sqlmock connection. Mocks that expect writeStmt
@@ -89,18 +96,107 @@ func TestWriteIndex(t *testing.T) {
 	if err := isp.WriteIndex(context.Background(), keys, value); err != nil {
 		t.Errorf("%v, %v", expectedStmt, err)
 	}
+	isp.Flush()
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
 	}
 
-	expectedErr := errors.New("badness")
-	mock.ExpectExec(expectedStmt).WillReturnError(expectedErr)
-	if err := isp.WriteIndex(context.Background(), keys, value); err == nil {
-		t.Error("unexpected success")
+	// keys queued together coalesce into a single wide INSERT
+	keysBatch := []string{"key1", "key2"}
+	valueBatch := "uuid1"
+	expectedBatchStmt := expectedStmt + ",(?, ?)"
+	mock.ExpectExec(expectedBatchStmt).WithArgs("key1", valueBatch, "key2", valueBatch).WillReturnResult(sqlmock.NewResult(2, 2))
+	if err := isp.WriteIndex(context.Background(), keysBatch, valueBatch); err != nil {
+		t.Errorf("%v, %v", expectedBatchStmt, err)
 	}
+	isp.Flush()
+
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
+	}
+}
+
+// TestWriteIndexCoalescesAcrossCalls covers the point of the bundler: keys from separate
+// entries, queued in separate WriteIndex calls, collapse into one INSERT. Batching within
+// a single call was already what the pre-bundler multi-row insert did.
+func TestWriteIndexCoalescesAcrossCalls(t *testing.T) {
+	db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
+	// long enough that only the explicit Flush can close the bundle
+	isp := IndexStorageProvider{writeDB: db, batchDelay: time.Minute}
+	defer isp.Shutdown() //nolint:errcheck
+
+	mock.ExpectExec(positionalWriteStmt()+",(?, ?)").
+		WithArgs("key1", "uuid1", "key2", "uuid2").
+		WillReturnResult(sqlmock.NewResult(2, 2))
+
+	if err := isp.WriteIndex(context.Background(), []string{"key1"}, "uuid1"); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if err := isp.WriteIndex(context.Background(), []string{"key2"}, "uuid2"); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	isp.Flush()
+
+	// a second INSERT here means the two calls did not share a bundle
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestBatchDelayOption asserts the configured delay reaches the bundler, since nothing
+// else observes it and an ignored value would silently keep the default.
+func TestBatchDelayOption(t *testing.T) {
+	for _, tc := range []struct{ delay, want time.Duration }{
+		{0, bundleDelay},
+		{time.Second, time.Second},
+	} {
+		t.Run(tc.delay.String(), func(t *testing.T) {
+			db, _ := newMockDB(t, sqlmock.QueryMatcherEqual)
+			isp := IndexStorageProvider{writeDB: db}
+			WithBatchDelay(tc.delay).applyBatchDelay(&isp.batchDelay)
+			t.Cleanup(func() { isp.Shutdown() }) //nolint:errcheck
+
+			if got := isp.initBundler().DelayThreshold; got != tc.want {
+				t.Errorf("got DelayThreshold = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMaxEntryKeyCharsMatchesSchema keeps the guard pinned to the column it protects.
+func TestMaxEntryKeyCharsMatchesSchema(t *testing.T) {
+	want := fmt.Sprintf("varchar(%d)", maxEntryKeyChars)
+	if !strings.Contains(createTableStmt, want) {
+		t.Errorf("createTableStmt does not declare EntryKey as %s", want)
+	}
+}
+
+// TestWriteIndexError covers the batch write failing after WriteIndex has already
+// returned nil, which is the only way a MySQL error can now surface.
+func TestWriteIndexError(t *testing.T) {
+	db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
+
+	// registered before the provider so Shutdown's drain still logs to the observer
+	observed, logs := observer.New(zapcore.ErrorLevel)
+	restore := log.Logger
+	log.Logger = zap.New(observed).Sugar()
+	defer func() { log.Logger = restore }()
+
+	isp := IndexStorageProvider{writeDB: db}
+	defer isp.Shutdown() //nolint:errcheck
+
+	mock.ExpectExec(positionalWriteStmt()).WillReturnError(errors.New("badness"))
+	if err := isp.WriteIndex(context.Background(), []string{"key"}, "value"); err != nil {
+		t.Errorf("queueing should not fail: %v", err)
+	}
+	isp.Flush()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+	if logs.FilterMessageSnippet("badness").Len() != 1 {
+		t.Errorf("write failure was not logged, got entries: %v", logs.All())
 	}
 }
 
@@ -130,6 +226,7 @@ func TestPoolSeparation(t *testing.T) {
 	if err := isp.WriteIndex(context.Background(), keys, value); err != nil {
 		t.Errorf("write: %v", err)
 	}
+	isp.Flush()
 
 	// an unmet expectation on either mock means a statement went to the wrong pool
 	if err := readMock.ExpectationsWereMet(); err != nil {
@@ -238,6 +335,86 @@ func TestUninitializedClient(t *testing.T) {
 	}
 	if err := isp.WriteIndex(context.Background(), []string{"key"}, "value"); err == nil {
 		t.Error("unexpected success")
+	}
+}
+
+// TestWriteIndexKeyLengthLimit pins the skip to EntryKey's character limit rather than its
+// byte length: utf8mb4 permits four bytes per character, so a 512 character key of astral
+// codepoints is 2048 bytes and still fits the column.
+func TestWriteIndexKeyLengthLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		key     string
+		skipped bool
+	}{
+		{"ascii at limit", strings.Repeat("a", maxEntryKeyChars), false},
+		{"ascii over limit", strings.Repeat("a", maxEntryKeyChars+1), true},
+		{"four byte runes at limit", strings.Repeat("𝔘", maxEntryKeyChars), false},
+		{"four byte runes over limit", strings.Repeat("𝔘", maxEntryKeyChars+1), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
+			isp := IndexStorageProvider{writeDB: db}
+			t.Cleanup(func() { isp.Shutdown() }) //nolint:errcheck
+
+			// with no expectation registered, any statement reaching the mock fails the test
+			if !tc.skipped {
+				mock.ExpectExec(positionalWriteStmt()).WithArgs(tc.key, "uuid").
+					WillReturnResult(sqlmock.NewResult(1, 1))
+			}
+			if err := isp.WriteIndex(context.Background(), []string{tc.key}, "uuid"); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			isp.Flush()
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// TestWriteIndexSkipsOnlyOversizedKey guards the per-key granularity of the skip: dropping
+// one key must not cost the entry its remaining, valid index keys.
+func TestWriteIndexSkipsOnlyOversizedKey(t *testing.T) {
+	db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
+	isp := IndexStorageProvider{writeDB: db}
+	defer isp.Shutdown() //nolint:errcheck
+
+	oversized := strings.Repeat("a", maxEntryKeyChars+1)
+	mock.ExpectExec(positionalWriteStmt()+",(?, ?)").WithArgs("good1", "uuid", "good2", "uuid").
+		WillReturnResult(sqlmock.NewResult(2, 2))
+
+	if err := isp.WriteIndex(context.Background(), []string{"good1", oversized, "good2"}, "uuid"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	isp.Flush()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestBundlerHandlerLimit pins how HandlerLimit is derived from the write pool: it tracks
+// the pool's limit so batch writers cannot outnumber the connections they need, and an
+// unlimited pool falls back to defaultHandlerLimit rather than the bundler's default of 1.
+func TestBundlerHandlerLimit(t *testing.T) {
+	for _, tc := range []struct{ writeMaxOpen, want int }{
+		{1, 1},
+		{5, 5},
+		{20, 20},
+		{0, defaultHandlerLimit},
+	} {
+		t.Run(fmt.Sprintf("max_open_conns_%d", tc.writeMaxOpen), func(t *testing.T) {
+			writeDB, _ := newMockDB(t, sqlmock.QueryMatcherEqual)
+			writeDB.SetMaxOpenConns(tc.writeMaxOpen)
+			isp := IndexStorageProvider{writeDB: writeDB}
+			t.Cleanup(func() { isp.Shutdown() }) //nolint:errcheck
+
+			if got := isp.initBundler().HandlerLimit; got != tc.want {
+				t.Errorf("got bundler.HandlerLimit = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -17,9 +17,33 @@ package mysql
 import (
 	"github.com/jmoiron/sqlx"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 var (
+	// WriteIndex returns as soon as an entry's keys are buffered, so rekor_index_storage_latency_summary
+	// in pkg/api only times the enqueue and can no longer observe a failed insert. These cover the
+	// batched write that actually reaches the database.
+	metricBatchWrites = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "rekor_index_storage_batch_writes_total",
+		Help: "Batched search index writes by outcome",
+	}, []string{"success"})
+
+	metricBatchWriteRows = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "rekor_index_storage_batch_write_rows_total",
+		Help: "Index keys carried by batched search index writes, by outcome; keys counted as failed were never indexed",
+	}, []string{"success"})
+
+	metricBatchWriteLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "rekor_index_storage_batch_write_latency_seconds",
+		Help: "Latency of batched search index writes by outcome",
+	}, []string{"success"})
+
+	metricSkippedKeys = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "rekor_index_storage_oversized_keys_total",
+		Help: "Index keys dropped for exceeding the EntryKey column width",
+	})
+
 	openConnsDesc = prometheus.NewDesc(
 		"rekor_index_storage_db_connections_open",
 		"Established connections to the search index database, both in use and idle",
