@@ -184,6 +184,8 @@ services:
       "--trillian_log_server.sharding_config=/$SHARDING_CONFIG",
       "--search_index.storage_provider=mysql",
       "--search_index.mysql.dsn=test:zaphod@tcp(mysql:3306)/test?parseTime=true&interpolateParams=true",
+      # see docker-compose.yml: e2e searches for entries immediately after uploading them
+      "--search_index.mysql.batch_delay=1ms",
       # Uncomment this for production logging
       # "--log_type=prod",
       ]

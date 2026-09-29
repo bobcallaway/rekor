@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -51,6 +52,7 @@ const (
 
 	// index writes are coalesced across entries so a burst of uploads costs a few wide
 	// INSERTs instead of one per entry. The delay bounds how long a key stays unsearchable.
+	// The count is of entries, not rows, since each entry is buffered as a single item.
 	bundleDelay = 250 * time.Millisecond
 	bundleCount = 100
 
@@ -92,6 +94,14 @@ type IndexStorageProvider struct {
 	bundler     *bundler.Bundler
 	bundlerOnce sync.Once
 	batchDelay  time.Duration
+
+	// closeMu orders WriteIndex against Shutdown: once closed is set, no key can be
+	// buffered after the drain has started and left behind in a bundle nobody waits for.
+	closeMu sync.RWMutex
+	closed  bool
+	// poolsClosed is set only once the drain is over, so a bundle still retrying past a
+	// drain timeout stops instead of failing repeatedly against a closed pool.
+	poolsClosed atomic.Bool
 }
 
 // indexEntry is one row of writeStmt; the tags name writeStmt's bind parameters.
@@ -101,6 +111,10 @@ type indexEntry struct {
 }
 
 func (e indexEntry) size() int { return len(e.Key) + len(e.UUID) }
+
+// errShutdown is returned by WriteIndex once Shutdown has begun, and ends retries of a
+// bundle whose pool has been closed.
+var errShutdown = errors.New("search index storage is shut down")
 
 func NewProvider(dsn string, opts ...Options) (*IndexStorageProvider, error) {
 	provider := &IndexStorageProvider{}
@@ -143,7 +157,9 @@ func NewProvider(dsn string, opts ...Options) (*IndexStorageProvider, error) {
 
 func (isp *IndexStorageProvider) initBundler() *bundler.Bundler {
 	isp.bundlerOnce.Do(func() {
-		b := bundler.NewBundler(indexEntry{}, isp.writeBundle)
+		// the item is all of one entry's rows, so an entry is buffered, bundled and
+		// written all-or-nothing rather than split across bundles
+		b := bundler.NewBundler([]indexEntry{}, isp.writeBundle)
 		b.DelayThreshold = bundleDelay
 		if isp.batchDelay > 0 {
 			b.DelayThreshold = isp.batchDelay
@@ -166,13 +182,21 @@ func (isp *IndexStorageProvider) initBundler() *bundler.Bundler {
 // WriteIndex has long since returned, so a failure here is only observable through these
 // metrics and logs; the entries in a bundle that exhausts its retries stay unsearchable.
 func (isp *IndexStorageProvider) writeBundle(items any) {
-	entries := items.([]indexEntry)
+	var entries []indexEntry
+	for _, rows := range items.([][]indexEntry) {
+		entries = append(entries, rows...)
+	}
 
 	start := time.Now()
 	err := backoff.RetryNotify(func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), bundleWriteTimeout)
 		defer cancel()
-		return isp.execBundle(ctx, entries)
+		err := isp.execBundle(ctx, entries)
+		// once Shutdown has closed the pools, a retry can only fail again
+		if err != nil && isp.poolsClosed.Load() {
+			return backoff.Permanent(errors.Join(errShutdown, err))
+		}
+		return err
 	}, newBundleBackOff(), func(err error, wait time.Duration) {
 		metricBatchWriteRetries.Inc()
 		log.Logger.Warnf("batched WriteIndex of %d entries failed, retrying in %s: %v", len(entries), wait, err)
@@ -268,10 +292,10 @@ func (isp *IndexStorageProvider) WriteIndex(ctx context.Context, keys []string, 
 		return errors.New("sql client has not been initialized")
 	}
 
-	b := isp.initBundler()
 	// an entry indexed under some of its keys but not others is worse than one indexed
-	// under none, so every key is attempted even after one fails to buffer
-	var errs []error
+	// under none, so all of its rows are buffered as one item
+	rows := make([]indexEntry, 0, len(keys))
+	size := 0
 	for _, key := range keys {
 		// a key of at most maxEntryKeyChars bytes cannot exceed maxEntryKeyChars characters
 		if len(key) > maxEntryKeyChars {
@@ -283,11 +307,22 @@ func (isp *IndexStorageProvider) WriteIndex(ctx context.Context, keys []string, 
 			}
 		}
 		entry := indexEntry{Key: key, UUID: index}
-		if err := b.Add(entry, entry.size()); err != nil {
-			errs = append(errs, fmt.Errorf("buffering index key for entry %s: %w", index, err))
-		}
+		rows = append(rows, entry)
+		size += entry.size()
 	}
-	return errors.Join(errs...)
+	if len(rows) == 0 {
+		return nil
+	}
+
+	isp.closeMu.RLock()
+	defer isp.closeMu.RUnlock()
+	if isp.closed {
+		return fmt.Errorf("buffering index keys for entry %s: %w", index, errShutdown)
+	}
+	if err := isp.initBundler().Add(rows, size); err != nil {
+		return fmt.Errorf("buffering index keys for entry %s: %w", index, err)
+	}
+	return nil
 }
 
 // Flush waits for all buffered entries to be written to the database. It goes through
@@ -317,6 +352,11 @@ func (isp *IndexStorageProvider) drain() {
 
 // Shutdown cleans up any client resources that may be held by the provider
 func (isp *IndexStorageProvider) Shutdown() error {
+	// stop accepting keys first, so everything buffered is covered by the drain below
+	isp.closeMu.Lock()
+	isp.closed = true
+	isp.closeMu.Unlock()
+
 	// closing the pools out from under an in-flight bundle would fail writes that were
 	// already accepted, so the buffer drains first, while the pools are still usable
 	isp.drain()
@@ -327,6 +367,7 @@ func (isp *IndexStorageProvider) Shutdown() error {
 		isp.collector = nil
 	}
 
+	isp.poolsClosed.Store(true)
 	var errs []error
 	if isp.readDB != nil {
 		errs = append(errs, isp.readDB.Close())

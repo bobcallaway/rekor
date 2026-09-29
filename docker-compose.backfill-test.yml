@@ -35,6 +35,8 @@ services:
       "--max_request_body_size=32792576",
       "--search_index.storage_provider=${INDEX_BACKEND:-mysql}",
       "--search_index.mysql.dsn=test:zaphod@tcp(mysql:3306)/test?parseTime=true&interpolateParams=true",
+      # see docker-compose.yml: e2e searches for entries immediately after uploading them
+      "--search_index.mysql.batch_delay=1ms",
       ]
     ports:
       - "3000:3000"

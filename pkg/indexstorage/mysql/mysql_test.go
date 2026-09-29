@@ -33,6 +33,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"google.golang.org/api/support/bundler"
 )
 
 // newMockDB returns a sqlx handle over a sqlmock connection. Mocks that expect writeStmt
@@ -232,6 +233,92 @@ func TestWriteIndexRetry(t *testing.T) {
 	}
 	if logs.Len() != 0 {
 		t.Errorf("recovered write should not log an error, got entries: %v", logs.All())
+	}
+}
+
+// TestWriteIndexKeepsEntryInOneBundle guards against an entry's keys being split across
+// bundles, where one bundle could be written and the other lost. With a threshold of two
+// items, per-key buffering would close the bundle partway through the second entry.
+func TestWriteIndexKeepsEntryInOneBundle(t *testing.T) {
+	db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
+	isp := IndexStorageProvider{writeDB: db, batchDelay: time.Minute}
+	isp.initBundler().BundleCountThreshold = 2
+	defer isp.Shutdown() //nolint:errcheck
+
+	mock.ExpectExec(positionalWriteStmt()+",(?, ?),(?, ?)").
+		WithArgs("a1", "uuidA", "b1", "uuidB", "b2", "uuidB").
+		WillReturnResult(sqlmock.NewResult(3, 3))
+
+	if err := isp.WriteIndex(context.Background(), []string{"a1"}, "uuidA"); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if err := isp.WriteIndex(context.Background(), []string{"b1", "b2"}, "uuidB"); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	isp.Flush()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestWriteIndexOverflowIsAllOrNothing asserts a full buffer rejects an entry outright
+// rather than buffering the keys that happen to fit.
+func TestWriteIndexOverflowIsAllOrNothing(t *testing.T) {
+	db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
+	isp := IndexStorageProvider{writeDB: db}
+	// room for two of the three rows below; must be set before the first Add
+	isp.initBundler().BufferedByteLimit = 2 * indexEntry{Key: "k1", UUID: "uuid"}.size()
+	defer isp.Shutdown() //nolint:errcheck
+
+	// with no expectation registered, any statement reaching the mock fails the test
+	err := isp.WriteIndex(context.Background(), []string{"k1", "k2", "k3"}, "uuid")
+	if !errors.Is(err, bundler.ErrOverflow) {
+		t.Fatalf("got %v, want %v", err, bundler.ErrOverflow)
+	}
+	isp.Flush()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestWriteIndexAfterShutdown asserts keys arriving once Shutdown has begun are rejected,
+// since they would land in a bundle the drain never waits for.
+func TestWriteIndexAfterShutdown(t *testing.T) {
+	db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
+	mock.ExpectClose()
+	isp := IndexStorageProvider{writeDB: db}
+	if err := isp.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	if err := isp.WriteIndex(context.Background(), []string{"key"}, "uuid"); !errors.Is(err, errShutdown) {
+		t.Errorf("got %v, want %v", err, errShutdown)
+	}
+}
+
+// TestWriteIndexNoRetryAfterPoolsClosed covers a bundle outliving the drain timeout:
+// once the pools are closed, a failure ends the bundle instead of retrying.
+func TestWriteIndexNoRetryAfterPoolsClosed(t *testing.T) {
+	db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
+	isp := IndexStorageProvider{writeDB: db}
+	defer isp.Shutdown() //nolint:errcheck
+
+	retriesBefore := testutil.ToFloat64(metricBatchWriteRetries)
+	mock.ExpectExec(positionalWriteStmt()).WillReturnError(errors.New("sql: database is closed"))
+	if err := isp.WriteIndex(context.Background(), []string{"key"}, "uuid"); err != nil {
+		t.Fatalf("queueing should not fail: %v", err)
+	}
+	// set directly rather than via Shutdown, whose drain would flush before the pools close
+	isp.poolsClosed.Store(true)
+	isp.Flush()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+	if got := testutil.ToFloat64(metricBatchWriteRetries) - retriesBefore; got != 0 {
+		t.Errorf("got %v retries after pools closed, want 0", got)
 	}
 }
 

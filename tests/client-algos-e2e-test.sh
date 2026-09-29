@@ -130,6 +130,8 @@ services:
       "--attestation_storage_bucket=file:///var/run/attestations",
       "--search_index.storage_provider=mysql",
       "--search_index.mysql.dsn=test:zaphod@tcp(mysql:3306)/test?parseTime=true&interpolateParams=true",
+      # see docker-compose.yml: e2e searches for entries immediately after uploading them
+      "--search_index.mysql.batch_delay=1ms",
       "--client-signing-algorithms=rsa-sign-pkcs1-2048-sha256,ed25519-ph",
       # Uncomment this for production logging
       # "--log_type=prod",
