@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/jmoiron/sqlx"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sigstore/rekor/pkg/log"
@@ -62,8 +63,14 @@ const (
 	bufferedByteLimit = 32 << 20
 
 	// a bundle carries at most bundleCount rows and does not inherit the caller's deadline,
-	// so this only needs to cover one wide INSERT.
+	// so this only needs to cover one wide INSERT. Each attempt gets its own timeout.
 	bundleWriteTimeout = 5 * time.Second
+
+	// a failed bundle costs up to bundleCount entries their index keys, so transient errors
+	// (a dropped connection, a failover) are retried. Attempts are capped because a bundle
+	// holds one of the HandlerLimit slots for as long as it is retrying.
+	bundleWriteRetries      = 2
+	bundleRetryInitialDelay = 100 * time.Millisecond
 
 	// ceiling on the shutdown drain, chosen to leave the rest of StopAPI room inside a
 	// typical 30s container termination grace period.
@@ -155,25 +162,39 @@ func (isp *IndexStorageProvider) initBundler() *bundler.Bundler {
 	return isp.bundler
 }
 
-// writeBundle inserts one coalesced batch of index entries. WriteIndex has long since
-// returned, so a failure here is only observable through these metrics and logs; the
-// entries in a failed bundle are not retried and stay unsearchable.
+// writeBundle inserts one coalesced batch of index entries, retrying transient failures.
+// WriteIndex has long since returned, so a failure here is only observable through these
+// metrics and logs; the entries in a bundle that exhausts its retries stay unsearchable.
 func (isp *IndexStorageProvider) writeBundle(items any) {
 	entries := items.([]indexEntry)
 
-	ctx, cancel := context.WithTimeout(context.Background(), bundleWriteTimeout)
-	defer cancel()
-
 	start := time.Now()
-	err := isp.execBundle(ctx, entries)
+	err := backoff.RetryNotify(func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), bundleWriteTimeout)
+		defer cancel()
+		return isp.execBundle(ctx, entries)
+	}, newBundleBackOff(), func(err error, wait time.Duration) {
+		metricBatchWriteRetries.Inc()
+		log.Logger.Warnf("batched WriteIndex of %d entries failed, retrying in %s: %v", len(entries), wait, err)
+	})
 	labels := prometheus.Labels{"success": strconv.FormatBool(err == nil)}
 	metricBatchWrites.With(labels).Inc()
 	metricBatchWriteRows.With(labels).Add(float64(len(entries)))
 	metricBatchWriteLatency.With(labels).Observe(time.Since(start).Seconds())
 
 	if err != nil {
-		log.Logger.Errorf("batched WriteIndex of %d entries failed, those keys are not indexed: %v", len(entries), err)
+		log.Logger.Errorf("batched WriteIndex of %d entries failed after %d attempts, those keys are not indexed: %v",
+			len(entries), bundleWriteRetries+1, err)
 	}
+}
+
+// newBundleBackOff bounds retries by count rather than elapsed time, since each attempt
+// already carries its own bundleWriteTimeout.
+func newBundleBackOff() backoff.BackOff {
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = bundleRetryInitialDelay
+	b.MaxElapsedTime = 0
+	return backoff.WithMaxRetries(b, bundleWriteRetries)
 }
 
 func (isp *IndexStorageProvider) execBundle(ctx context.Context, entries []indexEntry) error {

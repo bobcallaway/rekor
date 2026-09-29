@@ -39,6 +39,11 @@ var (
 		Help: "Latency of batched search index writes by outcome",
 	}, []string{"success"})
 
+	metricBatchWriteRetries = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "rekor_index_storage_batch_write_retries_total",
+		Help: "Retries of failed batched search index writes",
+	})
+
 	metricSkippedKeys = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "rekor_index_storage_oversized_keys_total",
 		Help: "Index keys dropped for exceeding the EntryKey column width",

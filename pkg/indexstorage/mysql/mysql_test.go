@@ -172,8 +172,8 @@ func TestMaxEntryKeyCharsMatchesSchema(t *testing.T) {
 	}
 }
 
-// TestWriteIndexError covers the batch write failing after WriteIndex has already
-// returned nil, which is the only way a MySQL error can now surface.
+// TestWriteIndexError covers the batch write exhausting its retries after WriteIndex has
+// already returned nil, which is the only way a MySQL error can now surface.
 func TestWriteIndexError(t *testing.T) {
 	db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
 
@@ -186,7 +186,9 @@ func TestWriteIndexError(t *testing.T) {
 	isp := IndexStorageProvider{writeDB: db}
 	defer isp.Shutdown() //nolint:errcheck
 
-	mock.ExpectExec(positionalWriteStmt()).WillReturnError(errors.New("badness"))
+	for range bundleWriteRetries + 1 {
+		mock.ExpectExec(positionalWriteStmt()).WillReturnError(errors.New("badness"))
+	}
 	if err := isp.WriteIndex(context.Background(), []string{"key"}, "value"); err != nil {
 		t.Errorf("queueing should not fail: %v", err)
 	}
@@ -195,8 +197,41 @@ func TestWriteIndexError(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
 	}
+	// retries log at warn, below the observer's level, so only the final failure is seen
 	if logs.FilterMessageSnippet("badness").Len() != 1 {
-		t.Errorf("write failure was not logged, got entries: %v", logs.All())
+		t.Errorf("write failure was not logged exactly once, got entries: %v", logs.All())
+	}
+}
+
+// TestWriteIndexRetry covers a transient failure: the bundle is retried and written, and
+// nothing is reported as lost.
+func TestWriteIndexRetry(t *testing.T) {
+	db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
+
+	observed, logs := observer.New(zapcore.ErrorLevel)
+	restore := log.Logger
+	log.Logger = zap.New(observed).Sugar()
+	defer func() { log.Logger = restore }()
+
+	isp := IndexStorageProvider{writeDB: db}
+	defer isp.Shutdown() //nolint:errcheck
+
+	retriesBefore := testutil.ToFloat64(metricBatchWriteRetries)
+	mock.ExpectExec(positionalWriteStmt()).WithArgs("key", "value").WillReturnError(errors.New("connection reset"))
+	mock.ExpectExec(positionalWriteStmt()).WithArgs("key", "value").WillReturnResult(sqlmock.NewResult(1, 1))
+	if err := isp.WriteIndex(context.Background(), []string{"key"}, "value"); err != nil {
+		t.Errorf("queueing should not fail: %v", err)
+	}
+	isp.Flush()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+	if got := testutil.ToFloat64(metricBatchWriteRetries) - retriesBefore; got != 1 {
+		t.Errorf("got %v retries, want 1", got)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("recovered write should not log an error, got entries: %v", logs.All())
 	}
 }
 
