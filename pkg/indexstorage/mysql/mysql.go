@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -64,8 +65,8 @@ const (
 	// MySQL outage surfaces as an error instead of growing the heap without bound.
 	bufferedByteLimit = 32 << 20
 
-	// a bundle carries at most bundleCount rows and does not inherit the caller's deadline,
-	// so this only needs to cover one wide INSERT. Each attempt gets its own timeout.
+	// a bundle carries at most bundleCount entries and does not inherit the caller's deadline,
+	// so this only needs to cover its few wide INSERTs. Each attempt gets its own timeout.
 	bundleWriteTimeout = 5 * time.Second
 
 	// a failed bundle costs up to bundleCount entries their index keys, so transient errors
@@ -73,6 +74,12 @@ const (
 	// holds one of the HandlerLimit slots for as long as it is retrying.
 	bundleWriteRetries      = 2
 	bundleRetryInitialDelay = 100 * time.Millisecond
+
+	// bundleCount bounds entries rather than rows, and an entry's key count is up to the
+	// client, so a bundle is split into INSERTs of at most this many rows. That stays far
+	// below both the 65,535 placeholder limit on server-side prepared statements (two per
+	// row), which applies when the DSN omits interpolateParams=true, and max_allowed_packet.
+	maxRowsPerInsert = 1000
 
 	// ceiling on the shutdown drain, chosen to leave the rest of StopAPI room inside a
 	// typical 30s container termination grace period.
@@ -182,8 +189,9 @@ func (isp *IndexStorageProvider) initBundler() *bundler.Bundler {
 // WriteIndex has long since returned, so a failure here is only observable through these
 // metrics and logs; the entries in a bundle that exhausts its retries stay unsearchable.
 func (isp *IndexStorageProvider) writeBundle(items any) {
+	bundle := items.([][]indexEntry)
 	var entries []indexEntry
-	for _, rows := range items.([][]indexEntry) {
+	for _, rows := range bundle {
 		entries = append(entries, rows...)
 	}
 
@@ -199,7 +207,7 @@ func (isp *IndexStorageProvider) writeBundle(items any) {
 		return err
 	}, newBundleBackOff(), func(err error, wait time.Duration) {
 		metricBatchWriteRetries.Inc()
-		log.Logger.Warnf("batched WriteIndex of %d entries failed, retrying in %s: %v", len(entries), wait, err)
+		log.Logger.Warnf("batched WriteIndex of %d entries (%d keys) failed, retrying in %s: %v", len(bundle), len(entries), wait, err)
 	})
 	labels := prometheus.Labels{"success": strconv.FormatBool(err == nil)}
 	metricBatchWrites.With(labels).Inc()
@@ -207,8 +215,8 @@ func (isp *IndexStorageProvider) writeBundle(items any) {
 	metricBatchWriteLatency.With(labels).Observe(time.Since(start).Seconds())
 
 	if err != nil {
-		log.Logger.Errorf("batched WriteIndex of %d entries failed after %d attempts, those keys are not indexed: %v",
-			len(entries), bundleWriteRetries+1, err)
+		log.Logger.Errorf("batched WriteIndex of %d entries (%d keys) failed after %d attempts, those keys are not indexed: %v",
+			len(bundle), len(entries), bundleWriteRetries+1, err)
 	}
 }
 
@@ -221,16 +229,21 @@ func newBundleBackOff() backoff.BackOff {
 	return backoff.WithMaxRetries(b, bundleWriteRetries)
 }
 
+// execBundle writes entries in INSERTs of at most maxRowsPerInsert rows. A failure partway
+// through leaves the earlier chunks written, which is safe to retry as a whole because
+// writeStmt is an INSERT IGNORE and rows that already exist are skipped.
 func (isp *IndexStorageProvider) execBundle(ctx context.Context, entries []indexEntry) error {
-	result, err := isp.writeDB.NamedExecContext(ctx, writeStmt, entries)
-	if err != nil {
-		return fmt.Errorf("mysql write error: %w", err)
+	for chunk := range slices.Chunk(entries, maxRowsPerInsert) {
+		result, err := isp.writeDB.NamedExecContext(ctx, writeStmt, chunk)
+		if err != nil {
+			return fmt.Errorf("mysql write error: %w", err)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("mysql error getting rowsAffected: %w", err)
+		}
+		log.Logger.Debugf("WriteIndex affected %d rows", rowsAffected)
 	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("mysql error getting rowsAffected: %w", err)
-	}
-	log.Logger.Debugf("WriteIndex affected %d rows", rowsAffected)
 	return nil
 }
 

@@ -322,6 +322,32 @@ func TestWriteIndexNoRetryAfterPoolsClosed(t *testing.T) {
 	}
 }
 
+// TestExecBundleChunksRows asserts a bundle is split into INSERTs of at most
+// maxRowsPerInsert rows, since an entry's key count is client controlled.
+func TestExecBundleChunksRows(t *testing.T) {
+	db, mock := newMockDB(t, sqlmock.QueryMatcherEqual)
+	isp := IndexStorageProvider{writeDB: db}
+	defer isp.Shutdown() //nolint:errcheck
+
+	keys := make([]string, maxRowsPerInsert+1)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("key%d", i)
+	}
+	mock.ExpectExec(positionalWriteStmt() + strings.Repeat(",(?, ?)", maxRowsPerInsert-1)).
+		WillReturnResult(sqlmock.NewResult(maxRowsPerInsert, maxRowsPerInsert))
+	mock.ExpectExec(positionalWriteStmt()).WithArgs(keys[maxRowsPerInsert], "uuid").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	if err := isp.WriteIndex(context.Background(), keys, "uuid"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	isp.Flush()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
 // TestPoolSeparation asserts reads never touch the write pool and vice versa.
 // Each mock fails the test if it receives an unexpected statement.
 func TestPoolSeparation(t *testing.T) {
