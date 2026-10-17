@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/go-openapi/runtime"
+	internalclient "github.com/sigstore/rekor/internal/trillianclient"
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/sigstore/rekor/pkg/generated/restapi/operations/entries"
 	"google.golang.org/grpc/codes"
@@ -118,4 +119,41 @@ func TestHandleRekorAPIError_ClientCanceled(t *testing.T) {
 			t.Errorf("Expected message %q, got %q", clientDisconnected, payload.Message)
 		}
 	})
+}
+
+func TestCreateLogEntryLocalOverload(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		err        error
+		code       int
+		retryAfter string
+	}{
+		{"local admission", internalclient.ErrPendingWritesFull, http.StatusServiceUnavailable, "1"},
+		{"wrapped admission", fmt.Errorf("add leaf: %w", internalclient.ErrPendingWritesFull), http.StatusServiceUnavailable, "1"},
+		{"identical backend status", status.Error(codes.ResourceExhausted, internalclient.ErrPendingWritesFull.Error()), http.StatusInternalServerError, ""},
+		{"backend exhaustion", status.Error(codes.ResourceExhausted, "backend limit"), http.StatusInternalServerError, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			params := entries.CreateLogEntryParams{HTTPRequest: httptest.NewRequest(http.MethodPost, "/api/v1/log/entries", nil)}
+			response := handleRekorAPIError(params, http.StatusInternalServerError, tt.err, trillianUnexpectedResult)
+			recorder := httptest.NewRecorder()
+			response.WriteResponse(recorder, runtime.JSONProducer())
+			if recorder.Code != tt.code {
+				t.Fatalf("status: got %d, want %d", recorder.Code, tt.code)
+			}
+			if got := recorder.Header().Get("Retry-After"); got != tt.retryAfter {
+				t.Fatalf("Retry-After: got %q, want %q", got, tt.retryAfter)
+			}
+			var payload models.Error
+			if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Code != int64(tt.code) {
+				t.Fatalf("body code: %d", payload.Code)
+			}
+			if tt.retryAfter != "" && payload.Message != "too many writes are pending; retry later" {
+				t.Fatalf("unexpected message: %q", payload.Message)
+			}
+		})
+	}
 }

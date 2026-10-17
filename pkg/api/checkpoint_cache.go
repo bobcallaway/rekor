@@ -20,12 +20,16 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/sigstore/rekor/pkg/util"
 	"github.com/sigstore/sigstore/pkg/signature"
 )
 
-const DefaultCheckpointCacheEntries = 128
+const (
+	DefaultCheckpointCacheEntries   = 128
+	DefaultCheckpointSigningTimeout = 30 * time.Second
+)
 
 type checkpointKey struct {
 	treeID   int64
@@ -43,7 +47,10 @@ type checkpointCall struct {
 // and retains recent results. Trillian roots advance sequentially, so a fixed
 // FIFO ring is both cheaper and more useful here than a pointer-heavy LRU.
 type checkpointCache struct {
-	mu sync.Mutex
+	mu          sync.Mutex
+	ctx         context.Context
+	stop        context.CancelFunc
+	signTimeout time.Duration
 
 	maxEntries int
 	entries    map[checkpointKey]*checkpointCall
@@ -51,14 +58,27 @@ type checkpointCache struct {
 	nextEvict  int
 }
 
-func newCheckpointCache(maxEntries int) *checkpointCache {
+func newCheckpointCache(maxEntries int, signTimeout time.Duration) *checkpointCache {
 	if maxEntries < 0 {
 		maxEntries = DefaultCheckpointCacheEntries
 	}
+	if signTimeout <= 0 {
+		signTimeout = DefaultCheckpointSigningTimeout
+	}
+	ctx, stop := context.WithCancel(context.Background())
 	return &checkpointCache{
-		maxEntries: maxEntries,
-		entries:    make(map[checkpointKey]*checkpointCall, maxEntries),
-		completed:  make([]checkpointKey, 0, maxEntries),
+		ctx:         ctx,
+		stop:        stop,
+		signTimeout: signTimeout,
+		maxEntries:  maxEntries,
+		entries:     make(map[checkpointKey]*checkpointCall, maxEntries),
+		completed:   make([]checkpointKey, 0, maxEntries),
+	}
+}
+
+func (c *checkpointCache) close() {
+	if c != nil {
+		c.stop()
 	}
 }
 
@@ -75,28 +95,52 @@ func (c *checkpointCache) sign(ctx context.Context, hostname string, treeID int6
 	if c == nil || c.maxEntries == 0 {
 		return createCheckpoint(ctx, hostname, treeID, treeSize, rootHash, signer)
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := c.ctx.Err(); err != nil {
+		return "", err
+	}
 	key, err := makeCheckpointKey(treeID, treeSize, rootHash)
 	if err != nil {
 		return "", err
 	}
 
 	c.mu.Lock()
-	if call := c.entries[key]; call != nil {
+	call := c.entries[key]
+	if call != nil {
 		checkpointCacheRequests.WithLabelValues("hit").Inc()
-		c.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.value, call.err
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
+	} else {
+		checkpointCacheRequests.WithLabelValues("miss").Inc()
+		call = &checkpointCall{done: make(chan struct{})}
+		c.entries[key] = call
+		// Shared work belongs to the cache, not to the first request. Copy
+		// the hash via key so it remains owned after that request returns.
+		signCtx, cancel := context.WithTimeout(c.ctx, c.signTimeout)
+		go func() {
+			defer cancel()
+			c.complete(signCtx, key, call, hostname, signer)
+		}()
 	}
-	checkpointCacheRequests.WithLabelValues("miss").Inc()
-	call := &checkpointCall{done: make(chan struct{})}
-	c.entries[key] = call
 	c.mu.Unlock()
 
-	call.value, call.err = createCheckpoint(ctx, hostname, treeID, treeSize, rootHash, signer)
+	// The initiating caller waits just like every subsequent caller, so
+	// cancellation never holds it until the shared signing operation ends.
+	select {
+	case <-call.done:
+		return call.value, call.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-c.ctx.Done():
+		return "", c.ctx.Err()
+	}
+}
+
+func (c *checkpointCache) complete(ctx context.Context, key checkpointKey, call *checkpointCall, hostname string, signer signature.Signer) {
+	call.value, call.err = createCheckpoint(ctx, hostname, key.treeID, key.treeSize, key.rootHash[:], signer)
+	if err := ctx.Err(); err != nil {
+		call.value, call.err = "", err
+	}
 
 	c.mu.Lock()
 	if call.err != nil {
@@ -111,7 +155,6 @@ func (c *checkpointCache) sign(ctx context.Context, hostname string, treeID int6
 	}
 	close(call.done)
 	c.mu.Unlock()
-	return call.value, call.err
 }
 
 func createCheckpoint(ctx context.Context, hostname string, treeID int64, treeSize uint64, rootHash []byte, signer signature.Signer) (string, error) {

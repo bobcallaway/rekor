@@ -19,8 +19,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/go-openapi/runtime"
@@ -104,7 +106,7 @@ func (t *errorHandlingTransport) RoundTrip(req *http.Request) (*http.Response, e
 		WaitMin:    t.waitMin,
 		WaitMax:    t.waitMax,
 		Backoff: func(waitMin, waitMax time.Duration, attempt int, resp *http.Response) time.Duration {
-			wait := httpretry.DefaultBackoff(waitMin, waitMax, attempt, resp)
+			wait := retryBackoff(waitMin, waitMax, attempt, resp)
 			if t.logger != nil {
 				desc := fmt.Sprintf("%s %s", req.Method, req.URL.Redacted())
 				if resp != nil {
@@ -178,4 +180,55 @@ func GetRekorClient(rekorServerURL string, opts ...Option) (*client.Rekor, error
 	registry := strfmt.Default
 	registry.Add("signedCheckpoint", &util.SignedNote{}, util.SignedCheckpointValidator)
 	return client.New(rt, registry), nil
+}
+
+// retryBackoff honors Retry-After on 429/503 and adds up to 25% jitter (at
+// most one second). Other responses use bounded exponential backoff with
+// up to 25% jitter, retaining explicit zero-delay options.
+func retryBackoff(min, max time.Duration, attempt int, resp *http.Response) time.Duration {
+	var retryAfter time.Duration
+	if resp != nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) {
+		value := resp.Header.Get("Retry-After")
+		if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds > 0 {
+			if seconds > int64(time.Duration(1<<63-1)/time.Second) {
+				retryAfter = time.Duration(1<<63 - 1)
+			} else {
+				retryAfter = time.Duration(seconds) * time.Second
+			}
+		} else if retryTime, err := http.ParseTime(value); err == nil {
+			retryAfter = time.Until(retryTime)
+		}
+	}
+	if delay := retryAfter; delay > 0 {
+		window := delay / 4
+		if window > time.Second {
+			window = time.Second
+		}
+		// Avoid overflowing when an unusually large Retry-After is received.
+		if delay > time.Duration(1<<63-1)-window {
+			return delay
+		}
+		return delay + time.Duration(rand.Int64N(int64(window)+1))
+	}
+	if min <= 0 || max <= 0 {
+		return 0
+	}
+	delay := min
+	for range attempt {
+		if delay >= max-delay {
+			return max
+		}
+		delay *= 2
+	}
+	if delay >= max {
+		return max
+	}
+	window := delay / 4
+	if remaining := max - delay; window > remaining {
+		window = remaining
+	}
+	if window <= 0 {
+		return delay
+	}
+	return delay + time.Duration(rand.Int64N(int64(window)+1))
 }

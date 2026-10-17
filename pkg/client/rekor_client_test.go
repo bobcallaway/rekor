@@ -17,6 +17,8 @@ package client
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -235,4 +237,79 @@ func TestGetRekorClientWithLogger(t *testing.T) {
 			t.Errorf("expected retrying request debug log, got: %s", out)
 		}
 	})
+}
+
+func TestRetryBackoff(t *testing.T) {
+	tests := []struct {
+		name         string
+		response     *http.Response
+		attempt      int
+		lower, upper time.Duration
+	}{
+		{name: "first retry", lower: time.Second, upper: 1250 * time.Millisecond},
+		{name: "exponential", attempt: 2, lower: 4 * time.Second, upper: 5 * time.Second},
+		{name: "bounded", attempt: 10, lower: 30 * time.Second, upper: 30 * time.Second},
+		{name: "503 retry after", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"60"}}}, lower: time.Minute, upper: time.Minute + time.Second},
+		{name: "429 retry after", response: &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": {"1"}}}, lower: time.Second, upper: 1250 * time.Millisecond},
+		{name: "HTTP date", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {time.Now().Add(time.Minute).UTC().Format(http.TimeFormat)}}}, lower: 58 * time.Second, upper: 61 * time.Second},
+		{name: "zero header uses fallback", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"0"}}}, lower: time.Second, upper: 1250 * time.Millisecond},
+		{name: "invalid header", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"invalid"}}}, lower: time.Second, upper: 1250 * time.Millisecond},
+		{name: "500 ignores header", response: &http.Response{StatusCode: 500, Header: http.Header{"Retry-After": {"60"}}}, lower: time.Second, upper: 1250 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for range 100 {
+				got := retryBackoff(time.Second, 30*time.Second, tt.attempt, tt.response)
+				if got < tt.lower || got > tt.upper {
+					t.Fatalf("delay %v outside [%v, %v]", got, tt.lower, tt.upper)
+				}
+			}
+		})
+	}
+	if got := retryBackoff(0, 0, 0, nil); got != 0 {
+		t.Fatalf("explicit zero delay: got %v", got)
+	}
+}
+
+func TestOverloadRetryHonorsCallerDeadline(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client, err := GetRekorClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = client.Tlog.GetLogInfo(tlog.NewGetLogInfoParams().WithContext(ctx))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected caller deadline, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected no retry before Retry-After, got %d attempts", calls)
+	}
+}
+
+func TestOverloadRetryBudget(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client, err := GetRekorClient(server.URL, WithRetryCount(2), WithRetryWaitMin(time.Millisecond), WithRetryWaitMax(2*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Tlog.GetLogInfo(tlog.NewGetLogInfoParams())
+	if err == nil {
+		t.Fatal("expected overload after exhausting retries")
+	}
+	if calls != 3 {
+		t.Fatalf("expected initial attempt plus two retries, got %d", calls)
+	}
 }

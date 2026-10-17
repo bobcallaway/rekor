@@ -202,7 +202,7 @@ func NewAPI(treeID int64) (*API, error) {
 		// Utility functionality not required for operation of the core service
 		newEntryPublisher:     newEntryPublisher,
 		algorithmRegistry:     algorithmRegistry,
-		checkpointCache:       newCheckpointCache(viper.GetInt("rekor_server.checkpoint_cache_entries")),
+		checkpointCache:       newCheckpointCache(viper.GetInt("rekor_server.checkpoint_cache_entries"), viper.GetDuration("rekor_server.checkpoint_signing_timeout")),
 		cachedCheckpoints:     cachedCheckpoints,
 		checkpointHostname:    checkpointHostname,
 		publishEventsProtobuf: publishEventsProtobuf,
@@ -264,6 +264,7 @@ func NewRedisClient() *redis.Client {
 }
 
 func StopAPI() {
+	api.checkpointCache.close()
 	// The HTTP shutdown deadline can expire while a handler is still finishing.
 	// Serialize producer registration with Wait so late entries cannot restart it.
 	indexStorageMu.Lock()

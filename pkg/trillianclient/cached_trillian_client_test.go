@@ -17,6 +17,9 @@ package trillianclient
 
 import (
 	"context"
+	"errors"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -79,6 +82,52 @@ func TestCachedClientFrozenTreeFetchesOnce(t *testing.T) {
 	require.Equal(t, codes.OK, resp.Status)
 	time.Sleep(5 * time.Millisecond)
 	tc.Close()
+}
+
+func TestCachedClientInitializationObservesRootPublishedBeforeLock(t *testing.T) {
+	tc := &cachedTrillianClient{
+		opts:     cacheOptions{frozen: true}.withDefaults(),
+		nextPoll: &pollResult{done: make(chan struct{})},
+		stopped:  context.Background(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+
+	func() {
+		tc.mu.Lock()
+		defer tc.mu.Unlock()
+		go func() { done <- tc.ensureRoot(ctx) }()
+
+		// Force the reader past its initial nil snapshot check and into the
+		// mutex wait. A sleep would not reliably exercise this interleaving.
+		require.Eventually(t, func() bool {
+			buf := make([]byte, 1<<20)
+			n := runtime.Stack(buf, true)
+			for _, stack := range strings.Split(string(buf[:n]), "\n\n") {
+				if strings.Contains(stack, "(*cachedTrillianClient).ensureRoot(") &&
+					strings.Contains(stack, "sync.(*Mutex).Lock(") {
+					return true
+				}
+			}
+			return false
+		}, time.Second, time.Millisecond)
+
+		// Model a completed first poll while the reader is waiting for mu:
+		// the root is published and inFlight is nil. For a frozen tree,
+		// nextPoll will never complete.
+		tc.snapshot.Store(&rootSnapshot{root: types.LogRootV1{TreeSize: 1}})
+		tc.lastSuccess.Store(cacheClockNow())
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("initialization waited for another poll despite a published root")
+	}
 }
 
 func TestCachedClientRejectsConflictingRoot(t *testing.T) {
@@ -300,4 +349,20 @@ func TestCachedAddWaitsForSharedRootAdvance(t *testing.T) {
 	resp := <-done
 	require.Equal(t, codes.OK, resp.Status)
 	require.NotNil(t, resp.GetLeafAndProofResult)
+}
+
+func TestCachedAddRejectsSaturationBeforeBackendCalls(t *testing.T) {
+	tc := &cachedTrillianClient{
+		metrics: newCachedClientMetrics(46),
+		pending: make(chan struct{}, 1),
+		stopped: context.Background(),
+		// No backend: reaching any RPC would panic.
+	}
+	require.NoError(t, tc.acquirePending(context.Background()))
+	defer tc.releasePending()
+	response := tc.AddLeaf(context.Background(), []byte("entry"))
+	require.Equal(t, codes.ResourceExhausted, response.Status)
+	require.True(t, errors.Is(response.Err, internalclient.ErrPendingWritesFull))
+	require.Nil(t, response.GetAddResult)
+	require.Len(t, tc.pending, 1)
 }

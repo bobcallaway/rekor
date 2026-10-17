@@ -131,6 +131,20 @@ Rekor allows customized manifests (which term them as types), [type customizatio
 
 If you're interested in integration with Rekor, we have an [OpenAPI swagger editor](https://sigstore.dev/swagger/)
 
+When signed-tree-head caching is enabled, a server that reaches its pending-write
+limit rejects new entry submissions with HTTP **503 Service Unavailable** and
+`Retry-After: 1`. This rejection happens before the entry is submitted to Trillian;
+the caller can retry the same entry. The delay is a backoff hint, not a guarantee
+that capacity will be available. Other failures can occur after submission, so
+clients should continue to handle duplicate-entry responses on retry.
+
+The Go client makes at most three retries by default, respecting the caller's
+context deadline. It honors positive `Retry-After` values on 429 and 503 responses
+and adds up to 25% jitter, capped at one additional second. Otherwise, it uses
+exponential backoff starting at one second, with up to 25% jitter and a maximum
+delay of 30 seconds. Retry counts and fallback delays can be overridden with
+client options. Explicit zero fallback delays remain supported.
+
 ## Security
 
 Should you discover any security issues, please refer to sigstore's [security process](https://github.com/sigstore/.github/blob/main/SECURITY.md)

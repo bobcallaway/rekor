@@ -96,7 +96,7 @@ func WithRetryWaitMin(t time.Duration) Option {
 	}
 }
 
-// WithRetryWaitMax sets the minimum length of time to wait between retries.
+// WithRetryWaitMax sets the maximum length of time to wait between retries.
 func WithRetryWaitMax(t time.Duration) Option {
 	return func(o *options) {
 		o.RetryWaitMax = t
