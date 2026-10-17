@@ -40,12 +40,17 @@ type options struct {
 const (
 	// DefaultRetryCount is the default number of retries.
 	DefaultRetryCount = 3
+	// DefaultRetryWaitMin and DefaultRetryWaitMax bound exponential retry delays.
+	DefaultRetryWaitMin = time.Second
+	DefaultRetryWaitMax = 30 * time.Second
 )
 
 func makeOptions(opts ...Option) *options {
 	o := &options{
-		UserAgent:  "",
-		RetryCount: DefaultRetryCount,
+		UserAgent:    "",
+		RetryCount:   DefaultRetryCount,
+		RetryWaitMin: DefaultRetryWaitMin,
+		RetryWaitMax: DefaultRetryWaitMax,
 	}
 
 	for _, opt := range opts {
@@ -76,7 +81,7 @@ func WithRetryWaitMin(t time.Duration) Option {
 	}
 }
 
-// WithRetryWaitMax sets the minimum length of time to wait between retries.
+// WithRetryWaitMax sets the maximum length of time to wait between retries.
 func WithRetryWaitMax(t time.Duration) Option {
 	return func(o *options) {
 		o.RetryWaitMax = t

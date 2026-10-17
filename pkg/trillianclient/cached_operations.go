@@ -41,7 +41,7 @@ func (t *cachedTrillianClient) acquirePending(ctx context.Context) error {
 		return status.Error(codes.Canceled, "trillian client closed")
 	default:
 		t.metrics.rejected.Inc()
-		return status.Error(codes.ResourceExhausted, "too many writes are waiting for Trillian inclusion")
+		return internalclient.ErrPendingWritesFull
 	}
 }
 

@@ -17,15 +17,18 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
 
+	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/strfmt"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	internalclient "github.com/sigstore/rekor/internal/trillianclient"
 	"github.com/sigstore/rekor/pkg/generated/models"
 	"github.com/sigstore/rekor/pkg/generated/restapi/operations/entries"
 	"github.com/sigstore/rekor/pkg/generated/restapi/operations/index"
@@ -88,6 +91,12 @@ var re = regexp.MustCompile("^(.*)Params$")
 
 func handleRekorAPIError(params any, code int, err error, message string, fields ...any) middleware.Responder {
 	code = mapGRPCToHTTP(code, err)
+	_, creatingEntry := params.(entries.CreateLogEntryParams)
+	overloaded := creatingEntry && errors.Is(err, internalclient.ErrPendingWritesFull)
+	if overloaded {
+		code = http.StatusServiceUnavailable
+		message = "too many writes are pending; retry later"
+	}
 
 	if message == "" {
 		// http.StatusText has no entry for the nonstandard 499
@@ -161,7 +170,14 @@ func handleRekorAPIError(params any, code int, err error, message string, fields
 		default:
 			requestFields := []any{"requestBody", params.ProposedEntry}
 			logMsg(params.HTTPRequest, requestFields...)
-			return entries.NewCreateLogEntryDefault(code).WithPayload(errorMsg(message, code))
+			response := entries.NewCreateLogEntryDefault(code).WithPayload(errorMsg(message, code))
+			if overloaded && code == http.StatusServiceUnavailable {
+				return middleware.ResponderFunc(func(w http.ResponseWriter, producer runtime.Producer) {
+					w.Header().Set("Retry-After", "1")
+					response.WriteResponse(w, producer)
+				})
+			}
+			return response
 		}
 	case entries.SearchLogQueryParams:
 		requestFields := []any{}

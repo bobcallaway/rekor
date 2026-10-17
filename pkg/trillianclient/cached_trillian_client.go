@@ -132,6 +132,13 @@ func (t *cachedTrillianClient) ensureRoot(ctx context.Context) error {
 		}
 
 		t.mu.Lock()
+		// The first poll may have finished after the fast-path check. Recheck
+		// under the publication lock before choosing a poll to wait for;
+		// frozen clients never run another poll after publishing their root.
+		if t.snapshot.Load() != nil {
+			t.mu.Unlock()
+			return nil
+		}
 		result := t.inFlight
 		if result == nil {
 			result = t.nextPoll

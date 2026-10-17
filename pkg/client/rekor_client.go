@@ -19,8 +19,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/go-openapi/runtime"
 	httptransport "github.com/go-openapi/runtime/client"
@@ -83,6 +85,7 @@ func GetRekorClient(rekorServerURL string, opts ...Option) (*client.Rekor, error
 	retryableClient.HTTPClient = &http.Client{
 		Transport: defaultTransport,
 	}
+	retryableClient.Backoff = retryBackoff
 	retryableClient.RetryMax = int(o.RetryCount)
 	retryableClient.RetryWaitMin = o.RetryWaitMin
 	retryableClient.RetryWaitMax = o.RetryWaitMax
@@ -105,4 +108,35 @@ func GetRekorClient(rekorServerURL string, opts ...Option) (*client.Rekor, error
 	registry := strfmt.Default
 	registry.Add("signedCheckpoint", &util.SignedNote{}, util.SignedCheckpointValidator)
 	return client.New(rt, registry), nil
+}
+
+// retryBackoff honors Retry-After on 429/503 and adds up to 25% jitter (at
+// most one second). Other responses use bounded exponential backoff with
+// up to 25% jitter, retaining explicit zero-delay options.
+func retryBackoff(min, max time.Duration, attempt int, resp *http.Response) time.Duration {
+	// Zero fallback bounds distinguish a positive Retry-After from the
+	// library's exponential fallback without duplicating its header parser.
+	if delay := retryablehttp.DefaultBackoff(0, 0, attempt, resp); delay > 0 {
+		window := delay / 4
+		if window > time.Second {
+			window = time.Second
+		}
+		// Avoid overflowing when an unusually large Retry-After is received.
+		if delay > time.Duration(1<<63-1)-window {
+			return delay
+		}
+		return delay + time.Duration(rand.Int64N(int64(window)+1))
+	}
+	delay := retryablehttp.DefaultBackoff(min, max, attempt, nil)
+	if delay <= 0 {
+		return delay
+	}
+	window := delay / 4
+	if remaining := max - delay; window > remaining {
+		window = remaining
+	}
+	if window <= 0 {
+		return delay
+	}
+	return delay + time.Duration(rand.Int64N(int64(window)+1))
 }

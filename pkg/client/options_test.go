@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -33,31 +34,39 @@ func TestMakeOptions(t *testing.T) {
 		want *options
 	}{{
 		desc: "no opts",
-		want: &options{RetryCount: DefaultRetryCount},
+		want: &options{RetryCount: DefaultRetryCount, RetryWaitMin: time.Second, RetryWaitMax: 30 * time.Second},
 	}, {
 		desc: "WithUserAgent",
 		opts: []Option{WithUserAgent("test user agent")},
-		want: &options{UserAgent: "test user agent", RetryCount: DefaultRetryCount},
+		want: &options{UserAgent: "test user agent", RetryCount: DefaultRetryCount, RetryWaitMin: time.Second, RetryWaitMax: 30 * time.Second},
 	}, {
 		desc: "WithRetryCount",
 		opts: []Option{WithRetryCount(2)},
-		want: &options{UserAgent: "", RetryCount: 2},
+		want: &options{UserAgent: "", RetryCount: 2, RetryWaitMin: time.Second, RetryWaitMax: 30 * time.Second},
 	}, {
 		desc: "WithLogger",
 		opts: []Option{WithLogger(customLogger)},
-		want: &options{UserAgent: "", RetryCount: DefaultRetryCount, Logger: customLogger},
+		want: &options{UserAgent: "", RetryCount: DefaultRetryCount, RetryWaitMin: time.Second, RetryWaitMax: 30 * time.Second, Logger: customLogger},
 	}, {
 		desc: "WithLoggerNil",
 		opts: []Option{WithLogger(nil)},
-		want: &options{UserAgent: "", RetryCount: DefaultRetryCount},
+		want: &options{UserAgent: "", RetryCount: DefaultRetryCount, RetryWaitMin: time.Second, RetryWaitMax: 30 * time.Second},
 	}, {
 		desc: "WithInsecureTLSEnabled",
 		opts: []Option{WithInsecureTLS(true)},
-		want: &options{UserAgent: "", RetryCount: DefaultRetryCount, InsecureTLS: true},
+		want: &options{UserAgent: "", RetryCount: DefaultRetryCount, RetryWaitMin: time.Second, RetryWaitMax: 30 * time.Second, InsecureTLS: true},
 	}, {
 		desc: "WithInsecureTLSDisabled",
 		opts: []Option{WithInsecureTLS(false)},
-		want: &options{UserAgent: "", RetryCount: DefaultRetryCount, InsecureTLS: false},
+		want: &options{UserAgent: "", RetryCount: DefaultRetryCount, RetryWaitMin: time.Second, RetryWaitMax: 30 * time.Second, InsecureTLS: false},
+	}, {
+		desc: "explicit retry delays",
+		opts: []Option{WithRetryWaitMin(2 * time.Second), WithRetryWaitMax(10 * time.Second)},
+		want: &options{RetryCount: DefaultRetryCount, RetryWaitMin: 2 * time.Second, RetryWaitMax: 10 * time.Second},
+	}, {
+		desc: "explicit zero retry delays",
+		opts: []Option{WithRetryWaitMin(0), WithRetryWaitMax(0)},
+		want: &options{RetryCount: DefaultRetryCount},
 	}}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {

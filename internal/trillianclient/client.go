@@ -21,7 +21,24 @@ import (
 	"github.com/google/trillian"
 	"github.com/google/trillian/types"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+// ErrPendingWritesFull identifies local admission rejection before QueueLeaf.
+// Backend ResourceExhausted errors must not be treated as this rejection.
+var ErrPendingWritesFull = &pendingWritesFullError{}
+
+// Use a distinct type: gRPC status errors compare equal by code and message,
+// which could otherwise misclassify an identical backend error as local.
+type pendingWritesFullError struct{}
+
+func (*pendingWritesFullError) Error() string {
+	return "too many writes are waiting for Trillian inclusion"
+}
+
+func (e *pendingWritesFullError) GRPCStatus() *status.Status {
+	return status.New(codes.ResourceExhausted, e.Error())
+}
 
 // UnmarshalLogRoot decodes a serialized Trillian LogRootV1.
 func UnmarshalLogRoot(logRoot []byte) (types.LogRootV1, error) {
