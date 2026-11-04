@@ -1,0 +1,320 @@
+[
+  {
+    "name": "clean-cached-100",
+    "iterations": 3000,
+    "offered_rate": 100,
+    "iterations_per_scheduled_second": 100.0,
+    "k6_reported_iteration_rate": 97.29591578890755,
+    "dropped": 0,
+    "errors": 0,
+    "overload": 0,
+    "cpu_ms_per_http": 2.9,
+    "allocated_bytes_per_http": 68008.9729032258,
+    "p95_ms": {
+      "log_info": 3.529394800000002,
+      "lookup_index": 26.549541449999992,
+      "create": 218.88205105,
+      "lookup_uuid": 36.12521895
+    },
+    "backend_rpcs": {
+      "GetInclusionProofByHash": 2356,
+      "GetLatestSignedLogRoot": 343,
+      "GetEntryAndProof": 900,
+      "GetLeavesByRange": 1900,
+      "InitLog": 0,
+      "QueueLeaf": 700
+    },
+    "steady_http_requests": 2492,
+    "steady_allocated_bytes_per_http": 65059.34510433387,
+    "steady_cpu_ms_per_http": 2.821027287319422,
+    "steady_root_polls": 251,
+    "metadata": {
+      "name": "clean-cached-100",
+      "cache": "true",
+      "checkpoints": "128",
+      "rate": "100",
+      "duration": 30,
+      "mode": "mixed",
+      "vus": "300",
+      "proof_concurrency": "32",
+      "poll_interval": "100ms",
+      "timestamp": 1792205331.1569479,
+      "binary_sha256": "e1a184c6b388aaaecac9b7880b962929588efe6d3c9b8d0bf16c22a4955ef8a8",
+      "docker_info": "4 CPUs, 16773120000 bytes RAM",
+      "go_version": "go version go1.27.1 linux/amd64",
+      "images": [
+        "[\"rekor-rekor-server:latest\"] sha256:75633a0e7f8512b8cd0feace5c7525db63c8c750549f93bb26a729c632f1e37c",
+        "[\"rekor-trillian-log-server:latest\"] sha256:9157630e2baa881ab380e9774723bd4e660a422b84eeb30314d37b72dc49a121",
+        "[\"rekor-trillian-log-signer:latest\"] sha256:f08f53aebf9d3b0ab5eba0a95fdb98e11db2361dce6655cddbdae811ba43c8f6",
+        "[\"gcr.io/trillian-opensource-ci/db_server:v1.4.0\"] sha256:0794abd3bdf44a567f5d6ef18a0b76802f388611b63aae33eaf28c3b0c5964d8",
+        "[\"grafana/k6:1.0.0\"] sha256:f21270290d702cbf0a7d6ba5d7ed100b63bcb233b558b885ed787547b3488279"
+      ],
+      "k6_exit_code": 0
+    }
+  },
+  {
+    "name": "clean-cached-100-poll50",
+    "iterations": 3001,
+    "offered_rate": 100,
+    "iterations_per_scheduled_second": 100.03333333333333,
+    "k6_reported_iteration_rate": 95.65091811070809,
+    "dropped": 0,
+    "errors": 0,
+    "overload": 0,
+    "cpu_ms_per_http": 3.044179297000968,
+    "allocated_bytes_per_http": 68715.12673331183,
+    "p95_ms": {
+      "create": 168.509429,
+      "lookup_uuid": 30.8562491,
+      "log_info": 3.6592730500000012,
+      "lookup_index": 20.23903639999999
+    },
+    "backend_rpcs": {
+      "GetInclusionProofByHash": 2175,
+      "GetLatestSignedLogRoot": 787,
+      "GetEntryAndProof": 900,
+      "GetLeavesByRange": 1901,
+      "InitLog": 0,
+      "QueueLeaf": 701
+    },
+    "steady_http_requests": 2497,
+    "steady_allocated_bytes_per_http": 65519.77573087705,
+    "steady_cpu_ms_per_http": 2.8594313175810977,
+    "steady_root_polls": 503,
+    "metadata": {
+      "name": "clean-cached-100-poll50",
+      "cache": "true",
+      "checkpoints": "128",
+      "rate": "100",
+      "duration": 30,
+      "mode": "mixed",
+      "vus": "300",
+      "proof_concurrency": "32",
+      "poll_interval": "50ms",
+      "timestamp": 1792205558.6844418,
+      "binary_sha256": "e1a184c6b388aaaecac9b7880b962929588efe6d3c9b8d0bf16c22a4955ef8a8",
+      "docker_info": "4 CPUs, 16773120000 bytes RAM",
+      "go_version": "go version go1.27.1 linux/amd64",
+      "images": [
+        "[\"rekor-rekor-server:latest\"] sha256:75633a0e7f8512b8cd0feace5c7525db63c8c750549f93bb26a729c632f1e37c",
+        "[\"rekor-trillian-log-server:latest\"] sha256:9157630e2baa881ab380e9774723bd4e660a422b84eeb30314d37b72dc49a121",
+        "[\"rekor-trillian-log-signer:latest\"] sha256:f08f53aebf9d3b0ab5eba0a95fdb98e11db2361dce6655cddbdae811ba43c8f6",
+        "[\"gcr.io/trillian-opensource-ci/db_server:v1.4.0\"] sha256:0794abd3bdf44a567f5d6ef18a0b76802f388611b63aae33eaf28c3b0c5964d8",
+        "[\"grafana/k6:1.0.0\"] sha256:f21270290d702cbf0a7d6ba5d7ed100b63bcb233b558b885ed787547b3488279"
+      ],
+      "k6_exit_code": 0
+    }
+  },
+  {
+    "name": "clean-capacity-500-p32",
+    "iterations": 7486,
+    "offered_rate": 500,
+    "iterations_per_scheduled_second": 249.53333333333333,
+    "k6_reported_iteration_rate": 216.75717990747796,
+    "dropped": 7515,
+    "errors": 0,
+    "overload": 0,
+    "cpu_ms_per_http": 2.034010018455049,
+    "allocated_bytes_per_http": 70064.40284735039,
+    "p95_ms": {
+      "lookup_index": 4569.1557209,
+      "log_info": 16.724526149999992,
+      "create": 8750.990541899999,
+      "lookup_uuid": 4648.440898
+    },
+    "backend_rpcs": {
+      "GetInclusionProofByHash": 6171,
+      "GetLatestSignedLogRoot": 359,
+      "GetEntryAndProof": 2244,
+      "GetLeavesByRange": 4594,
+      "InitLog": 0,
+      "QueueLeaf": 1598
+    },
+    "steady_http_requests": 6432,
+    "steady_allocated_bytes_per_http": 66457.74378109453,
+    "steady_cpu_ms_per_http": 1.9542910447761195,
+    "steady_root_polls": 272,
+    "metadata": {
+      "name": "clean-capacity-500-p32",
+      "cache": "true",
+      "checkpoints": "128",
+      "rate": "500",
+      "duration": 30,
+      "mode": "mixed",
+      "vus": "1000",
+      "proof_concurrency": "32",
+      "poll_interval": "100ms",
+      "timestamp": 1792205379.201895,
+      "binary_sha256": "e1a184c6b388aaaecac9b7880b962929588efe6d3c9b8d0bf16c22a4955ef8a8",
+      "docker_info": "4 CPUs, 16773120000 bytes RAM",
+      "go_version": "go version go1.27.1 linux/amd64",
+      "images": [
+        "[\"rekor-rekor-server:latest\"] sha256:75633a0e7f8512b8cd0feace5c7525db63c8c750549f93bb26a729c632f1e37c",
+        "[\"rekor-trillian-log-server:latest\"] sha256:9157630e2baa881ab380e9774723bd4e660a422b84eeb30314d37b72dc49a121",
+        "[\"rekor-trillian-log-signer:latest\"] sha256:f08f53aebf9d3b0ab5eba0a95fdb98e11db2361dce6655cddbdae811ba43c8f6",
+        "[\"gcr.io/trillian-opensource-ci/db_server:v1.4.0\"] sha256:0794abd3bdf44a567f5d6ef18a0b76802f388611b63aae33eaf28c3b0c5964d8",
+        "[\"grafana/k6:1.0.0\"] sha256:f21270290d702cbf0a7d6ba5d7ed100b63bcb233b558b885ed787547b3488279"
+      ],
+      "k6_exit_code": 99
+    }
+  },
+  {
+    "name": "clean-capacity-500-p64",
+    "iterations": 7574,
+    "offered_rate": 500,
+    "iterations_per_scheduled_second": 252.46666666666667,
+    "k6_reported_iteration_rate": 217.56056411753204,
+    "dropped": 7428,
+    "errors": 0,
+    "overload": 0,
+    "cpu_ms_per_http": 1.959864477456346,
+    "allocated_bytes_per_http": 69752.00521240552,
+    "p95_ms": {
+      "create": 8547.620909000001,
+      "lookup_uuid": 4520.39902265,
+      "log_info": 21.8415546,
+      "lookup_index": 4376.947490500001
+    },
+    "backend_rpcs": {
+      "GetInclusionProofByHash": 6330,
+      "GetLatestSignedLogRoot": 254,
+      "GetEntryAndProof": 2271,
+      "GetLeavesByRange": 4646,
+      "InitLog": 0,
+      "QueueLeaf": 1616
+    },
+    "steady_http_requests": 6482,
+    "steady_allocated_bytes_per_http": 66224.69114470843,
+    "steady_cpu_ms_per_http": 1.886763344646714,
+    "steady_root_polls": 182,
+    "metadata": {
+      "name": "clean-capacity-500-p64",
+      "cache": "true",
+      "checkpoints": "128",
+      "rate": "500",
+      "duration": 30,
+      "mode": "mixed",
+      "vus": "1000",
+      "proof_concurrency": "64",
+      "poll_interval": "100ms",
+      "timestamp": 1792205459.0902882,
+      "binary_sha256": "e1a184c6b388aaaecac9b7880b962929588efe6d3c9b8d0bf16c22a4955ef8a8",
+      "docker_info": "4 CPUs, 16773120000 bytes RAM",
+      "go_version": "go version go1.27.1 linux/amd64",
+      "images": [
+        "[\"rekor-rekor-server:latest\"] sha256:75633a0e7f8512b8cd0feace5c7525db63c8c750549f93bb26a729c632f1e37c",
+        "[\"rekor-trillian-log-server:latest\"] sha256:9157630e2baa881ab380e9774723bd4e660a422b84eeb30314d37b72dc49a121",
+        "[\"rekor-trillian-log-signer:latest\"] sha256:f08f53aebf9d3b0ab5eba0a95fdb98e11db2361dce6655cddbdae811ba43c8f6",
+        "[\"gcr.io/trillian-opensource-ci/db_server:v1.4.0\"] sha256:0794abd3bdf44a567f5d6ef18a0b76802f388611b63aae33eaf28c3b0c5964d8",
+        "[\"grafana/k6:1.0.0\"] sha256:f21270290d702cbf0a7d6ba5d7ed100b63bcb233b558b885ed787547b3488279"
+      ],
+      "k6_exit_code": 99
+    }
+  },
+  {
+    "name": "clean-direct-100",
+    "iterations": 3001,
+    "offered_rate": 100,
+    "iterations_per_scheduled_second": 100.03333333333333,
+    "k6_reported_iteration_rate": 95.77595554253274,
+    "dropped": 0,
+    "errors": 0,
+    "overload": 0,
+    "cpu_ms_per_http": 3.5504675910996455,
+    "allocated_bytes_per_http": 79441.15575620768,
+    "p95_ms": {
+      "create": 282.133361,
+      "lookup_uuid": 66.33294945,
+      "log_info": 22.434841050000017,
+      "lookup_index": 49.45907059999999
+    },
+    "backend_rpcs": {
+      "GetInclusionProofByHash": 2537,
+      "GetLatestSignedLogRoot": 5562,
+      "GetEntryAndProof": 900,
+      "GetLeavesByRange": 1901,
+      "InitLog": 0,
+      "QueueLeaf": 701
+    },
+    "steady_http_requests": 2486,
+    "steady_allocated_bytes_per_http": 76122.34271922767,
+    "steady_cpu_ms_per_http": 3.503620273531778,
+    "steady_root_polls": 0,
+    "metadata": {
+      "name": "clean-direct-100",
+      "cache": "false",
+      "checkpoints": "128",
+      "rate": "100",
+      "duration": 30,
+      "mode": "mixed",
+      "vus": "300",
+      "proof_concurrency": "32",
+      "poll_interval": "100ms",
+      "timestamp": 1792205289.148223,
+      "binary_sha256": "e1a184c6b388aaaecac9b7880b962929588efe6d3c9b8d0bf16c22a4955ef8a8",
+      "docker_info": "4 CPUs, 16773120000 bytes RAM",
+      "go_version": "go version go1.27.1 linux/amd64",
+      "images": [
+        "[\"rekor-rekor-server:latest\"] sha256:75633a0e7f8512b8cd0feace5c7525db63c8c750549f93bb26a729c632f1e37c",
+        "[\"rekor-trillian-log-server:latest\"] sha256:9157630e2baa881ab380e9774723bd4e660a422b84eeb30314d37b72dc49a121",
+        "[\"rekor-trillian-log-signer:latest\"] sha256:f08f53aebf9d3b0ab5eba0a95fdb98e11db2361dce6655cddbdae811ba43c8f6",
+        "[\"gcr.io/trillian-opensource-ci/db_server:v1.4.0\"] sha256:0794abd3bdf44a567f5d6ef18a0b76802f388611b63aae33eaf28c3b0c5964d8",
+        "[\"grafana/k6:1.0.0\"] sha256:f21270290d702cbf0a7d6ba5d7ed100b63bcb233b558b885ed787547b3488279"
+      ],
+      "k6_exit_code": 0
+    }
+  },
+  {
+    "name": "clean-logger-cached-100",
+    "iterations": 3001,
+    "offered_rate": 100,
+    "iterations_per_scheduled_second": 100.03333333333333,
+    "k6_reported_iteration_rate": 96.9718055082326,
+    "dropped": 0,
+    "errors": 0,
+    "overload": 0,
+    "cpu_ms_per_http": 2.8797162205740086,
+    "allocated_bytes_per_http": 63784.018058690745,
+    "p95_ms": {
+      "log_info": 4.645523750000001,
+      "create": 221.698861,
+      "lookup_uuid": 27.992219849999987,
+      "lookup_index": 21.81312919999998
+    },
+    "backend_rpcs": {
+      "GetInclusionProofByHash": 2554,
+      "GetLatestSignedLogRoot": 355,
+      "GetEntryAndProof": 900,
+      "GetLeavesByRange": 1901,
+      "InitLog": 0,
+      "QueueLeaf": 701
+    },
+    "steady_http_requests": 2495,
+    "steady_allocated_bytes_per_http": 60968.47775551102,
+    "steady_cpu_ms_per_http": 2.825651302605211,
+    "steady_root_polls": 252,
+    "metadata": {
+      "name": "clean-logger-cached-100",
+      "cache": "true",
+      "checkpoints": "128",
+      "rate": "100",
+      "duration": 30,
+      "mode": "mixed",
+      "vus": "300",
+      "proof_concurrency": "32",
+      "poll_interval": "100ms",
+      "timestamp": 1792205643.6711998,
+      "binary_sha256": "f16bbc0829f8aa1aea51a28fcb1026a86301e6fbca2db966bbfe21dc383c06c1",
+      "docker_info": "4 CPUs, 16773120000 bytes RAM",
+      "go_version": "go version go1.27.1 linux/amd64",
+      "images": [
+        "[\"rekor-rekor-server:latest\"] sha256:75633a0e7f8512b8cd0feace5c7525db63c8c750549f93bb26a729c632f1e37c",
+        "[\"rekor-trillian-log-server:latest\"] sha256:9157630e2baa881ab380e9774723bd4e660a422b84eeb30314d37b72dc49a121",
+        "[\"rekor-trillian-log-signer:latest\"] sha256:f08f53aebf9d3b0ab5eba0a95fdb98e11db2361dce6655cddbdae811ba43c8f6",
+        "[\"gcr.io/trillian-opensource-ci/db_server:v1.4.0\"] sha256:0794abd3bdf44a567f5d6ef18a0b76802f388611b63aae33eaf28c3b0c5964d8",
+        "[\"grafana/k6:1.0.0\"] sha256:f21270290d702cbf0a7d6ba5d7ed100b63bcb233b558b885ed787547b3488279"
+      ],
+      "k6_exit_code": 0
+    }
+  }
+]

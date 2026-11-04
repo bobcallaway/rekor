@@ -1,0 +1,6 @@
+/rekor-server*
+/freeze-trees
+/fixtures.json
+/results/
+/comparison.json
+__pycache__/
