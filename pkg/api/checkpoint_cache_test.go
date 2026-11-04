@@ -77,7 +77,7 @@ func TestCheckpointCacheCoalescesConcurrentSigning(t *testing.T) {
 	signer := newCountingSigner(t)
 	signer.entered = make(chan struct{})
 	signer.release = make(chan struct{})
-	cache := newCheckpointCache(8, 0)
+	cache := newCheckpointCache(8, 0, 0)
 	t.Cleanup(cache.close)
 	root := sha256.Sum256([]byte("root"))
 
@@ -108,7 +108,7 @@ func TestCheckpointCacheCoalescesConcurrentSigning(t *testing.T) {
 
 func TestCheckpointCacheUsesBoundedFIFO(t *testing.T) {
 	signer := newCountingSigner(t)
-	cache := newCheckpointCache(2, 0)
+	cache := newCheckpointCache(2, 0, 0)
 	t.Cleanup(cache.close)
 	roots := [3][sha256.Size]byte{
 		sha256.Sum256([]byte("a")),
@@ -128,7 +128,7 @@ func TestCheckpointCacheUsesBoundedFIFO(t *testing.T) {
 
 func TestCheckpointCacheRejectsInvalidRootHash(t *testing.T) {
 	signer := newCountingSigner(t)
-	cache := newCheckpointCache(2, 0)
+	cache := newCheckpointCache(2, 0, 0)
 	t.Cleanup(cache.close)
 	_, err := cache.sign(context.Background(), "rekor.example", 42, 1, []byte("short"), signer)
 	require.Error(t, err)
@@ -138,7 +138,7 @@ func TestCheckpointCacheRejectsInvalidRootHash(t *testing.T) {
 func TestCheckpointCacheDoesNotRetainSigningFailure(t *testing.T) {
 	signer := newCountingSigner(t)
 	signer.signErr = errors.New("kms unavailable")
-	cache := newCheckpointCache(2, 0)
+	cache := newCheckpointCache(2, 0, 0)
 	t.Cleanup(cache.close)
 	root := sha256.Sum256([]byte("root"))
 
@@ -156,7 +156,7 @@ func TestCheckpointCacheCallerCancellationDoesNotCancelSigning(t *testing.T) {
 		signer.entered = make(chan struct{})
 		signer.release = make(chan struct{})
 		signer.contexts = make(chan context.Context, 1)
-		cache := newCheckpointCache(8, time.Minute)
+		cache := newCheckpointCache(8, time.Minute, 0)
 		defer cache.close()
 		root := sha256.Sum256([]byte("root"))
 		originalRoot := root
@@ -221,7 +221,7 @@ func TestCheckpointCacheSigningTimeoutAllowsRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		signer := newCountingSigner(t)
 		signer.release = make(chan struct{})
-		cache := newCheckpointCache(8, time.Second)
+		cache := newCheckpointCache(8, time.Second, 0)
 		defer cache.close()
 		root := sha256.Sum256([]byte("root"))
 		start := time.Now()
@@ -243,7 +243,7 @@ func TestCheckpointCacheCloseCancelsSigning(t *testing.T) {
 		signer.entered = make(chan struct{})
 		signer.release = make(chan struct{})
 		signer.contexts = make(chan context.Context, 1)
-		cache := newCheckpointCache(8, time.Minute)
+		cache := newCheckpointCache(8, time.Minute, 0)
 		defer cache.close()
 		root := sha256.Sum256([]byte("root"))
 		done := make(chan error, 1)
@@ -270,7 +270,7 @@ func TestCheckpointCacheDisabledUsesCallerContext(t *testing.T) {
 		signer.entered = make(chan struct{})
 		signer.release = make(chan struct{})
 		signer.contexts = make(chan context.Context, 1)
-		cache := newCheckpointCache(0, time.Minute)
+		cache := newCheckpointCache(0, time.Minute, 0)
 		defer cache.close()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -285,5 +285,40 @@ func TestCheckpointCacheDisabledUsesCallerContext(t *testing.T) {
 		cancel()
 		require.ErrorIs(t, <-done, context.Canceled)
 		require.Empty(t, cache.entries)
+	})
+}
+
+func TestCheckpointCacheBoundsDistinctSigning(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		signer := newCountingSigner(t)
+		signer.release = make(chan struct{})
+		cache := newCheckpointCache(1, time.Second, 2)
+		defer cache.close()
+		root := sha256.Sum256([]byte("root"))
+		done := make(chan error, 3)
+		for _, size := range []uint64{1, 2, 1} {
+			go func() {
+				_, err := cache.sign(context.Background(), "rekor.example", 42, size, root[:], signer)
+				done <- err
+			}()
+		}
+		synctest.Wait()
+		require.EqualValues(t, 2, signer.calls.Load())
+		require.Equal(t, 2, cache.inFlight)
+		require.Len(t, cache.entries, 2)
+		_, err := cache.sign(context.Background(), "rekor.example", 42, 3, root[:], signer)
+		require.ErrorIs(t, err, errCheckpointSigningFull)
+		require.EqualValues(t, 2, signer.calls.Load())
+		time.Sleep(time.Second)
+		for range 3 {
+			require.ErrorIs(t, <-done, context.DeadlineExceeded)
+		}
+		require.Zero(t, cache.inFlight)
+		require.Empty(t, cache.entries)
+		close(signer.release)
+		_, err = cache.sign(context.Background(), "rekor.example", 42, 3, root[:], signer)
+		require.NoError(t, err)
+		require.Zero(t, cache.inFlight)
+		require.Len(t, cache.entries, 1)
 	})
 }

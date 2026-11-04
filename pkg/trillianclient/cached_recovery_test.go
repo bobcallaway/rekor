@@ -400,3 +400,87 @@ func TestCachedAddsAcrossSeveralRootAdvances(t *testing.T) {
 		require.Empty(t, tc.proofs)
 	})
 }
+
+func TestCachedWriterExpiresAfterFailedPolls(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tree := newLogTree(t, 2)
+		response := tree.response(0, 1)
+		backend := &controlledLogClient{}
+		backend.latest = func(context.Context, *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
+			return response, nil
+		}
+		backend.queue = func(context.Context, *trillian.QueueLeafRequest) (*trillian.QueueLeafResponse, error) {
+			return &trillian.QueueLeafResponse{QueuedLeaf: &trillian.QueuedLogLeaf{Leaf: testIntegratedLeaf(tree, 1)}}, nil
+		}
+		tc := newManuallyPolledClient(backend, cacheOptions{maxRootAge: time.Second, maxPending: 1})
+		defer tc.Close()
+		require.NoError(t, tc.poll())
+		done := make(chan *internalclient.Response, 1)
+		go func() { done <- tc.AddLeaf(context.Background(), []byte("leaf-1")) }()
+		synctest.Wait()
+		require.Len(t, tc.pending, 1)
+		time.Sleep(750 * time.Millisecond)
+		response = tree.response(1, 1)
+		require.NoError(t, tc.poll()) // An unchanged root extends freshness.
+		time.Sleep(500 * time.Millisecond)
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("healthy refresh did not extend waiter lifetime")
+		default:
+		}
+		response = tree.response(1, 2)
+		response.Proof.Hashes = [][]byte{make([]byte, 32)}
+		require.Error(t, tc.poll())
+		time.Sleep(501 * time.Millisecond)
+		result := <-done
+		require.Equal(t, codes.Unavailable, result.Status)
+		require.ErrorContains(t, result.Err, "stale")
+		require.Empty(t, tc.pending)
+		require.Zero(t, tc.waiters.waiterCount())
+		require.Empty(t, tc.waiters.heap)
+		response = tree.response(1, 2)
+		require.NoError(t, tc.poll())
+		require.Equal(t, codes.OK, tc.GetLatest(context.Background()).Status)
+		require.NoError(t, tc.acquirePending(context.Background()))
+		tc.releasePending()
+	})
+}
+
+func TestCachedQueuedProofRejectsExpiredRoot(t *testing.T) {
+	for _, byHash := range []bool{false, true} {
+		name := "index"
+		if byHash {
+			name = "hash"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tree := newLogTree(t, 1)
+				backend := &controlledLogClient{}
+				backend.latest = func(context.Context, *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
+					return tree.response(0, 1), nil
+				}
+				// Proof RPCs are deliberately unconfigured: a stale read must not call them.
+				tc := newManuallyPolledClient(backend, cacheOptions{maxRootAge: time.Second, proofConcurrency: 1})
+				defer tc.Close()
+				require.NoError(t, tc.poll())
+				require.NoError(t, tc.acquireProof(context.Background()))
+				done := make(chan *internalclient.Response, 1)
+				go func() {
+					if byHash {
+						done <- tc.GetLeafAndProofByHash(context.Background(), tree.leafHash(0))
+					} else {
+						done <- tc.GetLeafAndProofByIndex(context.Background(), 0)
+					}
+				}()
+				synctest.Wait()
+				time.Sleep(2 * time.Second)
+				tc.releaseProof()
+				result := <-done
+				require.Equal(t, codes.Unavailable, result.Status)
+				require.ErrorContains(t, result.Err, "stale")
+				require.Empty(t, tc.proofs)
+			})
+		})
+	}
+}
