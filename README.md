@@ -138,6 +138,15 @@ the caller can retry the same entry. The delay is a backoff hint, not a guarante
 that capacity will be available. Other failures can occur after submission, so
 clients should continue to handle duplicate-entry responses on retry.
 
+Checkpoint caching separately limits distinct signatures in progress with
+`rekor_server.checkpoint_signing_concurrency` (default 32). Requests for the
+same root share signing work even at this limit. Requests for additional roots
+receive HTTP 503 with `Retry-After: 1`; entry creation may already have submitted
+the entry at this point, so retries must handle duplicate-entry responses.
+`rekor_server.checkpoint_cache_entries` bounds completed results, and
+`rekor_server.checkpoint_signing_timeout` bounds shared signing duration.
+These signing limits apply when checkpoint caching is enabled.
+
 The Go client makes at most three retries by default, respecting the caller's
 context deadline. It honors positive `Retry-After` values on 429 and 503 responses
 and adds up to 25% jitter, capped at one additional second. Otherwise, it uses

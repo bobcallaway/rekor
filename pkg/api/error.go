@@ -89,15 +89,31 @@ func errorMsg(message string, code int) *models.Error {
 
 var re = regexp.MustCompile("^(.*)Params$")
 
-func handleRekorAPIError(params any, code int, err error, message string, fields ...any) middleware.Responder {
+func handleRekorAPIError(params any, code int, err error, message string, fields ...any) (responder middleware.Responder) {
 	code = mapGRPCToHTTP(code, err)
 	_, creatingEntry := params.(entries.CreateLogEntryParams)
 	overloaded := creatingEntry && errors.Is(err, internalclient.ErrPendingWritesFull)
+	signingOverloaded := errors.Is(err, errCheckpointSigningFull)
+	if signingOverloaded {
+		code = http.StatusServiceUnavailable
+		message = "too many checkpoints are being signed; retry later"
+	}
 	if overloaded {
 		code = http.StatusServiceUnavailable
 		message = "too many writes are pending; retry later"
 	}
 
+	if signingOverloaded {
+		defer func() {
+			response := responder
+			if code == http.StatusServiceUnavailable {
+				responder = middleware.ResponderFunc(func(w http.ResponseWriter, producer runtime.Producer) {
+					w.Header().Set("Retry-After", "1")
+					response.WriteResponse(w, producer)
+				})
+			}
+		}()
+	}
 	if message == "" {
 		// http.StatusText has no entry for the nonstandard 499
 		if code == statusClientClosedRequest {

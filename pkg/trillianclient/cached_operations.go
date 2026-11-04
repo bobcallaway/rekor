@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"time"
 
 	"github.com/google/trillian"
 	internalclient "github.com/sigstore/rekor/internal/trillianclient"
@@ -91,26 +92,42 @@ func (t *cachedTrillianClient) waitForSize(ctx context.Context, size uint64) err
 	t.metrics.waiterBuckets.Set(float64(len(t.waiters.heap)))
 	t.mu.Unlock()
 
-	select {
-	case <-bucket.done:
-		if snap := t.snapshot.Load(); snap != nil && snap.root.TreeSize >= size {
-			return nil
+	defer func() {
+		t.mu.Lock()
+		t.waiters.release(bucket)
+		t.metrics.waiters.Set(float64(t.waiters.waiterCount()))
+		t.metrics.waiterBuckets.Set(float64(len(t.waiters.heap)))
+		t.mu.Unlock()
+	}()
+	// Refreshes may extend this deadline without advancing the tree. Recheck
+	// lastSuccess when the timer fires so healthy, unchanged roots keep waiting.
+	remaining := func() time.Duration {
+		return t.opts.maxRootAge - time.Duration(cacheClockNow()-t.lastSuccess.Load())
+	}
+	timer := time.NewTimer(remaining())
+	defer timer.Stop()
+	for {
+		select {
+		case <-bucket.done:
+			snap, err := t.current(ctx)
+			if err != nil {
+				return err
+			}
+			if snap.root.TreeSize >= size {
+				return nil
+			}
+			return status.Error(codes.Canceled, "trillian client closed")
+		case <-timer.C:
+			if left := remaining(); left > 0 {
+				timer.Reset(left)
+				continue
+			}
+			return status.Error(codes.Unavailable, "cached signed log root is stale")
+		case <-ctx.Done():
+			return status.FromContextError(ctx.Err()).Err()
+		case <-t.stopped.Done():
+			return status.Error(codes.Canceled, "trillian client closed")
 		}
-		return status.Error(codes.Canceled, "trillian client closed")
-	case <-ctx.Done():
-		t.mu.Lock()
-		t.waiters.release(bucket)
-		t.metrics.waiters.Set(float64(t.waiters.waiterCount()))
-		t.metrics.waiterBuckets.Set(float64(len(t.waiters.heap)))
-		t.mu.Unlock()
-		return status.FromContextError(ctx.Err()).Err()
-	case <-t.stopped.Done():
-		t.mu.Lock()
-		t.waiters.release(bucket)
-		t.metrics.waiters.Set(float64(t.waiters.waiterCount()))
-		t.metrics.waiterBuckets.Set(float64(len(t.waiters.heap)))
-		t.mu.Unlock()
-		return status.Error(codes.Canceled, "trillian client closed")
 	}
 }
 
@@ -196,6 +213,10 @@ func (t *cachedTrillianClient) leafAndProofForHash(ctx context.Context, hash []b
 		return responseError(err)
 	}
 	defer t.releaseProof()
+	// Capacity may have been unavailable longer than the freshness window.
+	if _, err := t.current(ctx); err != nil {
+		return responseError(err)
+	}
 
 	proof := getProofByHash(ctx, t.client, t.verifier, t.logID, hash, snap)
 	if proof.Err != nil {
@@ -260,5 +281,9 @@ func (t *cachedTrillianClient) entryAndProof(ctx context.Context, index int64, s
 		return responseError(err)
 	}
 	defer t.releaseProof()
+	// Capacity may have been unavailable longer than the freshness window.
+	if _, err := t.current(ctx); err != nil {
+		return responseError(err)
+	}
 	return getEntryAndProof(ctx, t.client, t.verifier, t.logID, index, snap)
 }

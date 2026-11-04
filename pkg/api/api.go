@@ -202,7 +202,7 @@ func NewAPI(treeID int64) (*API, error) {
 		// Utility functionality not required for operation of the core service
 		newEntryPublisher:     newEntryPublisher,
 		algorithmRegistry:     algorithmRegistry,
-		checkpointCache:       newCheckpointCache(viper.GetInt("rekor_server.checkpoint_cache_entries"), viper.GetDuration("rekor_server.checkpoint_signing_timeout")),
+		checkpointCache:       newCheckpointCache(viper.GetInt("rekor_server.checkpoint_cache_entries"), viper.GetDuration("rekor_server.checkpoint_signing_timeout"), viper.GetInt("rekor_server.checkpoint_signing_concurrency")),
 		cachedCheckpoints:     cachedCheckpoints,
 		checkpointHostname:    checkpointHostname,
 		publishEventsProtobuf: publishEventsProtobuf,

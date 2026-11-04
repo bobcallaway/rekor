@@ -18,6 +18,7 @@ package api
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -27,9 +28,12 @@ import (
 )
 
 const (
-	DefaultCheckpointCacheEntries   = 128
-	DefaultCheckpointSigningTimeout = 30 * time.Second
+	DefaultCheckpointCacheEntries       = 128
+	DefaultCheckpointSigningConcurrency = 32
+	DefaultCheckpointSigningTimeout     = 30 * time.Second
 )
+
+var errCheckpointSigningFull = errors.New("too many checkpoints are being signed")
 
 type checkpointKey struct {
 	treeID   int64
@@ -53,17 +57,22 @@ type checkpointCache struct {
 	signTimeout time.Duration
 
 	maxEntries int
+	maxSigning int
+	inFlight   int
 	entries    map[checkpointKey]*checkpointCall
 	completed  []checkpointKey
 	nextEvict  int
 }
 
-func newCheckpointCache(maxEntries int, signTimeout time.Duration) *checkpointCache {
+func newCheckpointCache(maxEntries int, signTimeout time.Duration, maxSigning int) *checkpointCache {
 	if maxEntries < 0 {
 		maxEntries = DefaultCheckpointCacheEntries
 	}
 	if signTimeout <= 0 {
 		signTimeout = DefaultCheckpointSigningTimeout
+	}
+	if maxSigning <= 0 {
+		maxSigning = DefaultCheckpointSigningConcurrency
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	return &checkpointCache{
@@ -71,6 +80,7 @@ func newCheckpointCache(maxEntries int, signTimeout time.Duration) *checkpointCa
 		stop:        stop,
 		signTimeout: signTimeout,
 		maxEntries:  maxEntries,
+		maxSigning:  maxSigning,
 		entries:     make(map[checkpointKey]*checkpointCall, maxEntries),
 		completed:   make([]checkpointKey, 0, maxEntries),
 	}
@@ -111,6 +121,12 @@ func (c *checkpointCache) sign(ctx context.Context, hostname string, treeID int6
 	if call != nil {
 		checkpointCacheRequests.WithLabelValues("hit").Inc()
 	} else {
+		if c.inFlight >= c.maxSigning {
+			c.mu.Unlock()
+			checkpointCacheRequests.WithLabelValues("rejected").Inc()
+			return "", errCheckpointSigningFull
+		}
+		c.inFlight++
 		checkpointCacheRequests.WithLabelValues("miss").Inc()
 		call = &checkpointCall{done: make(chan struct{})}
 		c.entries[key] = call
@@ -143,6 +159,7 @@ func (c *checkpointCache) complete(ctx context.Context, key checkpointKey, call 
 	}
 
 	c.mu.Lock()
+	c.inFlight--
 	if call.err != nil {
 		delete(c.entries, key)
 		checkpointCacheRequests.WithLabelValues("sign_error").Inc()

@@ -157,3 +157,14 @@ func TestCreateLogEntryLocalOverload(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckpointSigningOverloadResponse(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/log/entries?logIndex=0", nil)
+	params := entries.GetLogEntryByIndexParams{HTTPRequest: req}
+	response := handleRekorAPIError(params, http.StatusInternalServerError, fmt.Errorf("checkpoint: %w", errCheckpointSigningFull), sthGenerateError)
+	recorder := httptest.NewRecorder()
+	response.WriteResponse(recorder, runtime.JSONProducer())
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") != "1" {
+		t.Fatalf("unexpected overload response: %d %v", recorder.Code, recorder.Header())
+	}
+}
