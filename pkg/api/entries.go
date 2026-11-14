@@ -619,7 +619,7 @@ func SearchLogQueryHandler(params entries.SearchLogQueryParams) middleware.Respo
 					// do nothing here, do not throw 404 error
 					continue
 				default:
-					return handleRekorAPIError(params, http.StatusInternalServerError, fmt.Errorf("error getLeafAndProofByHash(%s): code: %v, msg %v", hex.EncodeToString(hash), resp.Status, resp.Err), trillianCommunicationError)
+					return handleRekorAPIError(params, http.StatusInternalServerError, fmt.Errorf("error getLeafAndProofByHash(%s): code: %v, msg %w", hex.EncodeToString(hash), resp.Status, resp.Err), trillianCommunicationError)
 				}
 			}
 			searchByHashResults[i] = results
@@ -767,6 +767,9 @@ func retrieveUUIDFromTree(ctx context.Context, uuid string, tid int64) (models.L
 		return models.LogEntry{}, ctx.Err()
 	default:
 		log.ContextLogger(ctx).Errorf("Unexpected response code while attempting to retrieve UUID %v from TreeID %v: %v", uuid, tid, resp.Status)
+		if resp.Err != nil {
+			return models.LogEntry{}, fmt.Errorf("retrieving UUID %s from tree %d: %w", uuid, tid, resp.Err)
+		}
 		return models.LogEntry{}, errors.New("unexpected error")
 	}
 }
