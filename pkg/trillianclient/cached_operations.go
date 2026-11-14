@@ -215,6 +215,9 @@ func (t *cachedTrillianClient) AddLeaf(ctx context.Context, value []byte) *inter
 		return &internalclient.Response{Status: codes.OK, GetAddResult: queued}
 	}
 
+	if err := checkQueuedLeaf(value, queued.QueuedLeaf.Leaf); err != nil {
+		return &internalclient.Response{Status: status.Code(err), Err: err, GetAddResult: queued}
+	}
 	hash := queued.QueuedLeaf.Leaf.MerkleLeafHash
 	if err := t.waitForSize(ctx, before.root.TreeSize+1); err != nil {
 		return &internalclient.Response{Status: status.Code(err), Err: err, GetAddResult: queued}
@@ -224,7 +227,7 @@ func (t *cachedTrillianClient) AddLeaf(ctx context.Context, value []byte) *inter
 		if err != nil {
 			return &internalclient.Response{Status: status.Code(err), Err: err, GetAddResult: queued}
 		}
-		leaf := t.leafAndProofForHash(ctx, hash, snap)
+		leaf, used := t.leafAndProofForHash(ctx, hash, snap)
 		if leaf.Err == nil {
 			queued.QueuedLeaf.Leaf = leaf.GetLeafAndProofResult.Leaf
 			leaf.GetAddResult = queued
@@ -234,7 +237,7 @@ func (t *cachedTrillianClient) AddLeaf(ctx context.Context, value []byte) *inter
 			leaf.GetAddResult = queued
 			return leaf
 		}
-		if err := t.waitForSize(ctx, snap.root.TreeSize+1); err != nil {
+		if err := t.waitForSize(ctx, used.root.TreeSize+1); err != nil {
 			return &internalclient.Response{Status: status.Code(err), Err: err, GetAddResult: queued}
 		}
 	}
@@ -251,21 +254,23 @@ func (t *cachedTrillianClient) leafForHash(ctx context.Context, hash []byte, pro
 
 // leafAndProofForHash bounds the complete proof read, including the dependent
 // leaf lookup, so slow Trillian responses cannot create unbounded RPC fan-out.
-func (t *cachedTrillianClient) leafAndProofForHash(ctx context.Context, hash []byte, snap rootSnapshot) *internalclient.Response {
+func (t *cachedTrillianClient) leafAndProofForHash(ctx context.Context, hash []byte, snap rootSnapshot) (*internalclient.Response, rootSnapshot) {
 	if err := t.acquireProof(ctx); err != nil {
-		return responseError(err)
+		return responseError(err), snap
 	}
 	defer t.releaseProof()
-	// Capacity may have been unavailable longer than the freshness window.
-	if _, err := t.current(ctx); err != nil {
-		return responseError(err)
+	// Recheck freshness and use the newest verified root after waiting for
+	// capacity. Return that root so a subsequent miss waits for the right size.
+	next, err := t.current(ctx)
+	if err != nil {
+		return responseError(err), snap
 	}
-
+	snap = next
 	proof := getProofByHash(ctx, t.client, t.verifier, t.logID, hash, snap)
 	if proof.Err != nil {
-		return proof
+		return proof, snap
 	}
-	return t.leafForHash(ctx, hash, proof)
+	return t.leafForHash(ctx, hash, proof), snap
 }
 
 func (t *cachedTrillianClient) GetLeafAndProofByHash(ctx context.Context, hash []byte) *internalclient.Response {
@@ -273,7 +278,7 @@ func (t *cachedTrillianClient) GetLeafAndProofByHash(ctx context.Context, hash [
 	if err != nil {
 		return responseError(err)
 	}
-	result := t.leafAndProofForHash(ctx, hash, snap)
+	result, snap := t.leafAndProofForHash(ctx, hash, snap)
 	if result.Err != nil && !t.opts.frozen {
 		code := status.Code(result.Err)
 		if code == codes.NotFound || code == codes.OutOfRange {
@@ -285,7 +290,7 @@ func (t *cachedTrillianClient) GetLeafAndProofByHash(ctx context.Context, hash [
 				return responseError(err)
 			}
 			if next.root.TreeSize > snap.root.TreeSize {
-				result = t.leafAndProofForHash(ctx, hash, next)
+				result, _ = t.leafAndProofForHash(ctx, hash, next)
 			}
 		}
 	}
@@ -301,7 +306,7 @@ func (t *cachedTrillianClient) GetLeafAndProofByIndex(ctx context.Context, index
 		return responseError(err)
 	}
 	if uint64(index) < snap.root.TreeSize {
-		return t.entryAndProof(ctx, index, snap)
+		return t.entryAndProof(ctx, index)
 	}
 	if t.opts.frozen {
 		return responseError(status.Errorf(codes.NotFound, "leaf index %d is outside tree size %d", index, snap.root.TreeSize))
@@ -316,17 +321,18 @@ func (t *cachedTrillianClient) GetLeafAndProofByIndex(ctx context.Context, index
 	if uint64(index) >= snap.root.TreeSize {
 		return responseError(status.Errorf(codes.NotFound, "leaf index %d is outside tree size %d", index, snap.root.TreeSize))
 	}
-	return t.entryAndProof(ctx, index, snap)
+	return t.entryAndProof(ctx, index)
 }
 
-func (t *cachedTrillianClient) entryAndProof(ctx context.Context, index int64, snap rootSnapshot) *internalclient.Response {
+func (t *cachedTrillianClient) entryAndProof(ctx context.Context, index int64) *internalclient.Response {
 	if err := t.acquireProof(ctx); err != nil {
 		return responseError(err)
 	}
 	defer t.releaseProof()
 	// Capacity may have been unavailable longer than the freshness window.
-	if _, err := t.current(ctx); err != nil {
+	latest, err := t.current(ctx)
+	if err != nil {
 		return responseError(err)
 	}
-	return getEntryAndProof(ctx, t.client, t.verifier, t.logID, index, snap)
+	return getEntryAndProof(ctx, t.client, t.verifier, t.logID, index, latest)
 }

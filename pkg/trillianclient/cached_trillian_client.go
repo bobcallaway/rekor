@@ -82,6 +82,12 @@ func (o cacheOptions) withDefaults() cacheOptions {
 	return o
 }
 
+// retryMax keeps jittered error pauses within half the freshness window when
+// pollInterval permits it. Preserve the configured minimum polling interval.
+func (o cacheOptions) retryMax() time.Duration {
+	return max(o.pollInterval, min(errorBackoffMax, o.maxRootAge/4))
+}
+
 func cacheClockNow() int64 {
 	return time.Since(cacheClockStart).Nanoseconds()
 }
@@ -221,9 +227,11 @@ func (t *cachedTrillianClient) publish(next rootSnapshot) (bool, error) {
 		}
 	}
 
+	// Readers load the snapshot before lastSuccess. Publish freshness first so
+	// a new snapshot cannot be paired with the previous stale timestamp.
+	t.lastSuccess.Store(cacheClockNow())
 	snapshotCopy := next
 	t.snapshot.Store(&snapshotCopy)
-	t.lastSuccess.Store(cacheClockNow())
 	ready := t.waiters.satisfy(next.root.TreeSize)
 	t.metrics.rootSize.Set(float64(next.root.TreeSize))
 	t.metrics.waiters.Set(float64(t.waiters.waiterCount()))
@@ -237,13 +245,9 @@ func (t *cachedTrillianClient) publish(next rootSnapshot) (bool, error) {
 
 func (t *cachedTrillianClient) update() {
 	defer t.wg.Done()
-	maxBackoff := errorBackoffMax
-	if t.opts.pollInterval > maxBackoff {
-		maxBackoff = t.opts.pollInterval
-	}
 	retry := backoff.Backoff{
 		Min:    t.opts.pollInterval,
-		Max:    maxBackoff,
+		Max:    t.opts.retryMax(),
 		Factor: 2,
 		Jitter: true,
 	}

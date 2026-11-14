@@ -25,6 +25,7 @@ import (
 	"github.com/google/trillian/client"
 	"github.com/google/trillian/types"
 	internalclient "github.com/sigstore/rekor/internal/trillianclient"
+	"github.com/transparency-dev/merkle/rfc6962"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -34,6 +35,35 @@ import (
 type rootSnapshot struct {
 	root   types.LogRootV1
 	signed *trillian.SignedLogRoot
+}
+
+// checkQueuedLeaf binds the hash used to find an integrated entry to the bytes
+// submitted by the caller.
+func checkQueuedLeaf(value []byte, leaf *trillian.LogLeaf) error {
+	if leaf == nil {
+		return status.Error(codes.Internal, "trillian returned no queued leaf")
+	}
+	if want := rfc6962.DefaultHasher.HashLeaf(value); !bytes.Equal(leaf.MerkleLeafHash, want) {
+		return status.Errorf(codes.Internal, "trillian queued leaf hash %x, want %x", leaf.MerkleLeafHash, want)
+	}
+	return nil
+}
+
+// checkLeaf binds the body and position Rekor signs to the verified leaf hash.
+func checkLeaf(leaf *trillian.LogLeaf, index int64, hash []byte) error {
+	if leaf == nil {
+		return status.Error(codes.Internal, "trillian returned a nil leaf")
+	}
+	if leaf.LeafIndex != index {
+		return status.Errorf(codes.Internal, "trillian returned leaf index %d, want %d", leaf.LeafIndex, index)
+	}
+	if !bytes.Equal(leaf.MerkleLeafHash, hash) {
+		return status.Errorf(codes.Internal, "leaf hash mismatch: expected %x, got %x", hash, leaf.MerkleLeafHash)
+	}
+	if !bytes.Equal(rfc6962.DefaultHasher.HashLeaf(leaf.LeafValue), hash) {
+		return status.Errorf(codes.Internal, "leaf value at index %d does not match leaf hash %x", index, hash)
+	}
+	return nil
 }
 
 func getProofByHash(ctx context.Context, c trillian.TrillianLogClient, verifier *client.LogVerifier, logID int64, hash []byte, snap rootSnapshot) *internalclient.Response {
@@ -56,7 +86,13 @@ func getProofByHash(ctx context.Context, c trillian.TrillianLogClient, verifier 
 		err := fmt.Errorf("trillian returned no proof for hash %s", hex.EncodeToString(hash))
 		return &internalclient.Response{Status: status.Code(err), Err: err}
 	}
+	if len(resp.Proof) == 0 {
+		return responseError(status.Errorf(codes.NotFound, "no proof for hash %x in tree size %d", hash, snap.root.TreeSize))
+	}
 	for _, proof := range resp.Proof {
+		if proof == nil {
+			return responseError(status.Error(codes.Internal, "trillian returned a nil proof"))
+		}
 		if err := verifier.VerifyInclusionByHash(&snap.root, hash, proof); err != nil {
 			return &internalclient.Response{Status: status.Code(err), Err: err}
 		}
@@ -88,8 +124,7 @@ func getLeafForProof(ctx context.Context, c trillian.TrillianLogClient, logID, i
 		return &internalclient.Response{Status: codes.FailedPrecondition, Err: err}
 	}
 	leaf := resp.Leaves[0]
-	if !bytes.Equal(leaf.MerkleLeafHash, hash) {
-		err := fmt.Errorf("leaf hash mismatch: expected %v, got %v", hex.EncodeToString(hash), hex.EncodeToString(leaf.MerkleLeafHash))
+	if err := checkLeaf(leaf, index, hash); err != nil {
 		return &internalclient.Response{Status: status.Code(err), Err: err}
 	}
 	return &internalclient.Response{
@@ -119,6 +154,9 @@ func getEntryAndProof(ctx context.Context, c trillian.TrillianLogClient, verifie
 	}
 	if resp.Proof.LeafIndex != index {
 		return &internalclient.Response{Status: codes.Internal, Err: fmt.Errorf("trillian returned a proof for index %d, want %d", resp.Proof.LeafIndex, index)}
+	}
+	if err := checkLeaf(resp.Leaf, index, resp.Leaf.MerkleLeafHash); err != nil {
+		return responseError(err)
 	}
 	if err := verifier.VerifyInclusionByHash(&snap.root, resp.Leaf.MerkleLeafHash, resp.Proof); err != nil {
 		return &internalclient.Response{Status: status.Code(err), Err: err}

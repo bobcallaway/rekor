@@ -71,12 +71,22 @@ func (t *directTrillianClient) AddLeaf(ctx context.Context, byteValue []byte) *i
 	resp, err := t.client.QueueLeaf(ctx, rqst)
 
 	// check for error
-	if err != nil || (resp.QueuedLeaf.Status != nil && resp.QueuedLeaf.Status.Code != int32(codes.OK)) {
+	if err != nil {
 		return &internalclient.Response{
 			Status:       status.Code(err),
 			Err:          err,
 			GetAddResult: resp,
 		}
+	}
+
+	if resp == nil || resp.QueuedLeaf == nil || resp.QueuedLeaf.Leaf == nil {
+		return responseError(status.Error(codes.Internal, "trillian returned no queued leaf"))
+	}
+	if s := resp.QueuedLeaf.Status; s != nil && s.Code != int32(codes.OK) {
+		return &internalclient.Response{Status: codes.OK, GetAddResult: resp}
+	}
+	if err := checkQueuedLeaf(byteValue, resp.QueuedLeaf.Leaf); err != nil {
+		return &internalclient.Response{Status: status.Code(err), Err: err, GetAddResult: resp}
 	}
 
 	root, err := t.root(ctx)

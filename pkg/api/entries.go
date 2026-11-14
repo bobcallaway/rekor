@@ -764,7 +764,13 @@ func retrieveUUIDFromTree(ctx context.Context, uuid string, tid int64) (models.L
 		// If the client disconnected, trillian will return Canceled — surface
 		// that up the stack rather than logging it as an unexpected error.
 		// handleRekorAPIError rewrites this to a 499 response.
-		return models.LogEntry{}, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return models.LogEntry{}, err
+		}
+		// A backend cancellation is not a successful empty lookup or a client
+		// disconnect. Keep it a server error while the HTTP request is live.
+		log.ContextLogger(ctx).Errorf("Trillian canceled retrieving UUID %v from TreeID %v: %v", uuid, tid, resp.Err)
+		return models.LogEntry{}, errors.New("unexpected error")
 	default:
 		log.ContextLogger(ctx).Errorf("Unexpected response code while attempting to retrieve UUID %v from TreeID %v: %v", uuid, tid, resp.Status)
 		if resp.Err != nil {

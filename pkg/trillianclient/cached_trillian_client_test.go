@@ -336,7 +336,7 @@ func TestCachedAddWaitsForSharedRootAdvance(t *testing.T) {
 		&trillian.GetInclusionProofByHashResponse{Proof: []*trillian.Proof{{LeafIndex: 0, Hashes: tree.inclusion(0, 1)}}}, nil,
 	).Times(1)
 	s.Log.EXPECT().GetLeavesByRange(gomock.Any(), gomock.Any()).Return(
-		&trillian.GetLeavesByRangeResponse{Leaves: []*trillian.LogLeaf{{LeafIndex: 0, MerkleLeafHash: hash}}}, nil,
+		&trillian.GetLeavesByRangeResponse{Leaves: []*trillian.LogLeaf{testIntegratedLeaf(tree, 0)}}, nil,
 	).Times(1)
 
 	tc := newCachedTrillianClient(logClient, 42, cacheOptions{pollInterval: time.Hour})
