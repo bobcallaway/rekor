@@ -219,3 +219,26 @@ func TestProofQueueOverloadResponse(t *testing.T) {
 		}
 	}
 }
+
+// Closing a shared client must remain a server error while the HTTP request
+// is live. An actual caller cancellation still takes precedence.
+func TestHandleRekorAPIError_SharedClientClosed(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		want := http.StatusInternalServerError
+		if canceled {
+			cancel()
+			want = statusClientClosedRequest
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/log/entries", nil).WithContext(ctx)
+		params := entries.CreateLogEntryParams{HTTPRequest: req}
+		err := status.Error(codes.Unavailable, "trillian client closed")
+		responder := handleRekorAPIError(params, http.StatusInternalServerError, err, trillianUnexpectedResult)
+		recorder := httptest.NewRecorder()
+		responder.WriteResponse(recorder, runtime.JSONProducer())
+		if recorder.Code != want {
+			t.Errorf("canceled=%v: got HTTP %d, want %d", canceled, recorder.Code, want)
+		}
+		cancel()
+	}
+}

@@ -184,7 +184,7 @@ func TestCachedClientCloseUnblocksInitialization(t *testing.T) {
 	go func() {
 		defer close(done)
 		resp := tc.GetLatest(context.Background())
-		require.Equal(t, codes.Canceled, resp.Status)
+		require.Equal(t, codes.Unavailable, resp.Status)
 	}()
 	<-called
 	tc.Close()
@@ -314,7 +314,7 @@ func TestCachedClientCloseUnblocksSizeWaiters(t *testing.T) {
 	}, time.Second, time.Millisecond)
 
 	tc.Close()
-	require.Equal(t, codes.Canceled, status.Code(<-done))
+	require.Equal(t, codes.Unavailable, status.Code(<-done))
 	tc.Close()
 }
 

@@ -149,6 +149,7 @@ func TestCachedPollWaitCancellation(t *testing.T) {
 					want = codes.DeadlineExceeded
 				case "close":
 					tc.Close()
+					want = codes.Unavailable
 				}
 				require.Equal(t, want, status.Code(<-done))
 			})
@@ -244,7 +245,7 @@ func TestCachedProofQueueDeadlineAndShutdown(t *testing.T) {
 				want := codes.DeadlineExceeded
 				if shutdown {
 					tc.Close()
-					want = codes.Canceled
+					want = codes.Unavailable
 				} else {
 					time.Sleep(time.Second)
 				}

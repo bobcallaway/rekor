@@ -149,6 +149,12 @@ Queued requests respect cancellation and caller deadlines. Monitor
 `rekor_trillian_proofs_rejected_total` alongside `rekor_trillian_proofs_in_flight`
 to distinguish local queueing from backend RPC time. The wait histogram includes
 canceled queued requests but excludes immediate admissions and rejections.
+After a queued write's inclusion-proof lookup misses, the cached client retries
+when the tree grows or after ten polling intervals (one second by default),
+whichever happens first. This lets transient misses recover even on a quiet log.
+Retries retain the pending-write slot, reacquire proof capacity, and stop on
+request cancellation, client shutdown, stale roots, or non-miss errors.
+
 Lookup misses waiting for a root refresh fail when the cached root exceeds
 `trillian_log_server.sth_max_age`, including while root RPCs are stalled.
 

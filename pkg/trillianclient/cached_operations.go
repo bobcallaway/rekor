@@ -32,6 +32,9 @@ func responseError(err error) *internalclient.Response {
 }
 
 func (t *cachedTrillianClient) acquirePending(ctx context.Context) error {
+	if err := t.contextError(ctx); err != nil {
+		return err
+	}
 	select {
 	case t.pending <- struct{}{}:
 		t.metrics.pending.Inc()
@@ -39,7 +42,7 @@ func (t *cachedTrillianClient) acquirePending(ctx context.Context) error {
 	case <-ctx.Done():
 		return status.FromContextError(ctx.Err()).Err()
 	case <-t.stopped.Done():
-		return status.Error(codes.Canceled, "trillian client closed")
+		return t.contextError(ctx)
 	default:
 		t.metrics.rejected.Inc()
 		return internalclient.ErrPendingWritesFull
@@ -52,11 +55,8 @@ func (t *cachedTrillianClient) releasePending() {
 }
 
 func (t *cachedTrillianClient) acquireProof(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return status.FromContextError(err).Err()
-	}
-	if t.stopped.Err() != nil {
-		return status.Error(codes.Canceled, "trillian client closed")
+	if err := t.contextError(ctx); err != nil {
+		return err
 	}
 	// Uncontended reads do not consume queue capacity or record a queue wait.
 	select {
@@ -85,7 +85,7 @@ func (t *cachedTrillianClient) acquireProof(ctx context.Context) error {
 	case <-ctx.Done():
 		return status.FromContextError(ctx.Err()).Err()
 	case <-t.stopped.Done():
-		return status.Error(codes.Canceled, "trillian client closed")
+		return t.contextError(ctx)
 	}
 }
 
@@ -142,7 +142,7 @@ func (t *cachedTrillianClient) waitForSize(ctx context.Context, size uint64) err
 			if snap.root.TreeSize >= size {
 				return nil
 			}
-			return status.Error(codes.Canceled, "trillian client closed")
+			return errClientClosed
 		case <-timer.C:
 			if left := remaining(); left > 0 {
 				timer.Reset(left)
@@ -152,7 +152,7 @@ func (t *cachedTrillianClient) waitForSize(ctx context.Context, size uint64) err
 		case <-ctx.Done():
 			return status.FromContextError(ctx.Err()).Err()
 		case <-t.stopped.Done():
-			return status.Error(codes.Canceled, "trillian client closed")
+			return t.contextError(ctx)
 		}
 	}
 }
@@ -161,6 +161,9 @@ func (t *cachedTrillianClient) waitForSize(ctx context.Context, size uint64) err
 // current generation. It is used after a lookup miss: all callers share the
 // updater's next RPC instead of issuing one RPC per miss.
 func (t *cachedTrillianClient) waitForPoll(ctx context.Context) error {
+	if err := t.contextError(ctx); err != nil {
+		return err
+	}
 	t.mu.Lock()
 	result := t.nextPoll
 	t.mu.Unlock()
@@ -174,6 +177,9 @@ func (t *cachedTrillianClient) waitForPoll(ctx context.Context) error {
 	for {
 		select {
 		case <-result.done:
+			if err := t.contextError(ctx); err != nil {
+				return err
+			}
 			return result.err
 		case <-timer.C:
 			// An in-flight poll can refresh the same root while we wait for
@@ -186,7 +192,7 @@ func (t *cachedTrillianClient) waitForPoll(ctx context.Context) error {
 		case <-ctx.Done():
 			return status.FromContextError(ctx.Err()).Err()
 		case <-t.stopped.Done():
-			return status.Error(codes.Canceled, "trillian client closed")
+			return t.contextError(ctx)
 		}
 	}
 }
@@ -237,9 +243,17 @@ func (t *cachedTrillianClient) AddLeaf(ctx context.Context, value []byte) *inter
 			leaf.GetAddResult = queued
 			return leaf
 		}
-		if err := t.waitForSize(ctx, used.root.TreeSize+1); err != nil {
+		// Prefer a new root, but retry the same verified size periodically:
+		// a transient backend miss can outlast the log's final size advance.
+		waitCtx, cancel := context.WithTimeout(ctx, t.opts.addLeafRetryAfter())
+		err = t.waitForSize(waitCtx, used.root.TreeSize+1)
+		retry := waitCtx.Err() == context.DeadlineExceeded && status.Code(err) == codes.DeadlineExceeded
+		cancel()
+		if err != nil && !retry {
 			return &internalclient.Response{Status: status.Code(err), Err: err, GetAddResult: queued}
 		}
+		// The next iteration checks the original request and root freshness,
+		// then reacquires proof capacity. Only the local wait deadline retries.
 	}
 }
 

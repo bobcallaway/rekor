@@ -45,6 +45,20 @@ const (
 
 var cacheClockStart = time.Now()
 
+// Closing the shared client is a server-side failure, not caller cancellation.
+var errClientClosed = status.Error(codes.Unavailable, "trillian client closed")
+
+// contextError gives request cancellation precedence when both contexts ended.
+func (t *cachedTrillianClient) contextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return status.FromContextError(err).Err()
+	}
+	if t.stopped.Err() != nil {
+		return errClientClosed
+	}
+	return nil
+}
+
 type cacheOptions struct {
 	pollInterval     time.Duration
 	rootTimeout      time.Duration
@@ -86,6 +100,12 @@ func (o cacheOptions) withDefaults() cacheOptions {
 // pollInterval permits it. Preserve the configured minimum polling interval.
 func (o cacheOptions) retryMax() time.Duration {
 	return max(o.pollInterval, min(errorBackoffMax, o.maxRootAge/4))
+}
+
+// addLeafRetryAfter bounds the wait for growth after a queued leaf's proof
+// misses. A transient miss must not require another write to make progress.
+func (o cacheOptions) addLeafRetryAfter() time.Duration {
+	return 10 * o.pollInterval
 }
 
 func cacheClockNow() int64 {
@@ -140,6 +160,9 @@ func newCachedTrillianClient(c trillian.TrillianLogClient, logID int64, opts cac
 
 func (t *cachedTrillianClient) ensureRoot(ctx context.Context) error {
 	for {
+		if err := t.contextError(ctx); err != nil {
+			return err
+		}
 		if t.snapshot.Load() != nil {
 			return nil
 		}
@@ -159,6 +182,9 @@ func (t *cachedTrillianClient) ensureRoot(ctx context.Context) error {
 		t.mu.Unlock()
 		select {
 		case <-result.done:
+			if err := t.contextError(ctx); err != nil {
+				return err
+			}
 			if t.snapshot.Load() != nil {
 				return nil
 			}
@@ -168,7 +194,7 @@ func (t *cachedTrillianClient) ensureRoot(ctx context.Context) error {
 		case <-ctx.Done():
 			return status.FromContextError(ctx.Err()).Err()
 		case <-t.stopped.Done():
-			return status.Error(codes.Canceled, "trillian client closed")
+			return t.contextError(ctx)
 		}
 	}
 }
@@ -294,6 +320,11 @@ func (t *cachedTrillianClient) poll() error {
 	t.mu.Unlock()
 
 	snap, err := t.fetchRoot(t.stopped)
+	// The poll uses the shared lifetime context. Never expose its cancellation
+	// as cancellation of an unrelated live request waiting for this result.
+	if t.stopped.Err() != nil {
+		err = errClientClosed
+	}
 	if err == nil {
 		_, err = t.publish(snap)
 	}
