@@ -103,6 +103,7 @@ func init() {
 	rootCmd.PersistentFlags().Duration("trillian_log_server.sth_max_age", 0, "maximum cached tree-head age before reads fail; 0 derives a value from polling and RPC timeouts")
 	rootCmd.PersistentFlags().Int("trillian_log_server.max_pending_writes", trillianclient.DefaultMaxPending, "maximum writes per process waiting for Trillian inclusion")
 	rootCmd.PersistentFlags().Int("trillian_log_server.proof_concurrency", trillianclient.DefaultProofConcurrency, "maximum concurrent Trillian proof reads per tree and process")
+	rootCmd.PersistentFlags().Int("trillian_log_server.max_proof_waiters", trillianclient.DefaultMaxProofWaiters, "maximum requests queued for Trillian proof capacity per tree and process; nonpositive values use the default")
 
 	rootCmd.PersistentFlags().Uint("publish_frequency", 5, "how often to publish a new checkpoint, in minutes")
 

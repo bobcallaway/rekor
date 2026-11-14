@@ -131,6 +131,7 @@ func NewAPI(treeID int64) (*API, error) {
 			MaxRootAge:       viper.GetDuration("trillian_log_server.sth_max_age"),
 			MaxPending:       viper.GetInt("trillian_log_server.max_pending_writes"),
 			ProofConcurrency: viper.GetInt("trillian_log_server.proof_concurrency"),
+			MaxProofWaiters:  viper.GetInt("trillian_log_server.max_proof_waiters"),
 			FrozenTreeIDs:    frozenTreeIDs,
 		})
 	} else {

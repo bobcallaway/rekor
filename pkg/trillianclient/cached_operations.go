@@ -52,6 +52,32 @@ func (t *cachedTrillianClient) releasePending() {
 }
 
 func (t *cachedTrillianClient) acquireProof(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return status.FromContextError(err).Err()
+	}
+	if t.stopped.Err() != nil {
+		return status.Error(codes.Canceled, "trillian client closed")
+	}
+	// Uncontended reads do not consume queue capacity or record a queue wait.
+	select {
+	case t.proofs <- struct{}{}:
+		t.metrics.proofs.Inc()
+		return nil
+	default:
+	}
+	select {
+	case t.proofWaiters <- struct{}{}:
+	default:
+		t.metrics.proofsRejected.Inc()
+		return internalclient.ErrProofQueueFull
+	}
+	started := time.Now()
+	t.metrics.proofWaiters.Inc()
+	defer func() {
+		<-t.proofWaiters
+		t.metrics.proofWaiters.Dec()
+		t.metrics.proofWaitDuration.Observe(time.Since(started).Seconds())
+	}()
 	select {
 	case t.proofs <- struct{}{}:
 		t.metrics.proofs.Inc()
@@ -138,13 +164,30 @@ func (t *cachedTrillianClient) waitForPoll(ctx context.Context) error {
 	t.mu.Lock()
 	result := t.nextPoll
 	t.mu.Unlock()
-	select {
-	case <-result.done:
-		return result.err
-	case <-ctx.Done():
-		return status.FromContextError(ctx.Err()).Err()
-	case <-t.stopped.Done():
-		return status.Error(codes.Canceled, "trillian client closed")
+	// A miss may wait behind an in-flight RPC and its successor. Bound that
+	// wait by root freshness, just as we do for writers waiting for a size.
+	remaining := func() time.Duration {
+		return t.opts.maxRootAge - time.Duration(cacheClockNow()-t.lastSuccess.Load())
+	}
+	timer := time.NewTimer(remaining())
+	defer timer.Stop()
+	for {
+		select {
+		case <-result.done:
+			return result.err
+		case <-timer.C:
+			// An in-flight poll can refresh the same root while we wait for
+			// the next generation. Respect its extended freshness window.
+			if left := remaining(); left > 0 {
+				timer.Reset(left)
+				continue
+			}
+			return status.Error(codes.Unavailable, "cached signed log root is stale")
+		case <-ctx.Done():
+			return status.FromContextError(ctx.Err()).Err()
+		case <-t.stopped.Done():
+			return status.Error(codes.Canceled, "trillian client closed")
+		}
 	}
 }
 

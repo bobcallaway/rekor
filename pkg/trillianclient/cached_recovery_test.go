@@ -77,6 +77,7 @@ func newManuallyPolledClient(c trillian.TrillianLogClient, opts cacheOptions) *c
 		nextPoll:             &pollResult{done: make(chan struct{})},
 		pending:              make(chan struct{}, opts.maxPending),
 		proofs:               make(chan struct{}, opts.proofConcurrency),
+		proofWaiters:         make(chan struct{}, opts.maxProofWaiters),
 		stop:                 cancel,
 		stopped:              ctx,
 	}

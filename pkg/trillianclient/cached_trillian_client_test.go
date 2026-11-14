@@ -199,7 +199,8 @@ func TestCachedClientCloseUnblocksInitialization(t *testing.T) {
 func TestPollResultIsShared(t *testing.T) {
 	const callers = 16
 	result := &pollResult{done: make(chan struct{})}
-	tc := &cachedTrillianClient{nextPoll: result, stopped: context.Background()}
+	tc := &cachedTrillianClient{opts: cacheOptions{}.withDefaults(), nextPoll: result, stopped: context.Background()}
+	tc.lastSuccess.Store(cacheClockNow())
 
 	var wg sync.WaitGroup
 	wg.Add(callers)

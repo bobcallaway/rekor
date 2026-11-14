@@ -168,3 +168,54 @@ func TestCheckpointSigningOverloadResponse(t *testing.T) {
 		t.Fatalf("unexpected overload response: %d %v", recorder.Code, recorder.Header())
 	}
 }
+
+func TestProofQueueOverloadResponse(t *testing.T) {
+	for _, endpoint := range []string{"index", "uuid", "create", "search"} {
+		for _, kind := range []string{"local", "wrapped", "backend", "canceled"} {
+			t.Run(endpoint+"/"+kind, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/log/entries", nil)
+				err := error(internalclient.ErrProofQueueFull)
+				wantCode, wantRetry := http.StatusServiceUnavailable, "1"
+				switch kind {
+				case "wrapped":
+					err = fmt.Errorf("proof: %w", err)
+				case "backend":
+					err = status.Error(codes.ResourceExhausted, err.Error())
+					wantCode, wantRetry = http.StatusInternalServerError, ""
+				case "canceled":
+					ctx, cancel := context.WithCancel(req.Context())
+					cancel()
+					req = req.WithContext(ctx)
+					wantCode, wantRetry = statusClientClosedRequest, ""
+				}
+				var params any
+				switch endpoint {
+				case "index":
+					params = entries.GetLogEntryByIndexParams{HTTPRequest: req}
+				case "uuid":
+					params = entries.GetLogEntryByUUIDParams{HTTPRequest: req}
+				case "create":
+					params = entries.CreateLogEntryParams{HTTPRequest: req}
+				case "search":
+					params = entries.SearchLogQueryParams{HTTPRequest: req}
+				}
+				response := handleRekorAPIError(params, http.StatusInternalServerError, err, trillianUnexpectedResult)
+				recorder := httptest.NewRecorder()
+				response.WriteResponse(recorder, runtime.JSONProducer())
+				if recorder.Code != wantCode || recorder.Header().Get("Retry-After") != wantRetry {
+					t.Fatalf("unexpected response: %d %v", recorder.Code, recorder.Header())
+				}
+				var payload models.Error
+				if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload.Code != int64(wantCode) {
+					t.Fatalf("body code: got %d, want %d", payload.Code, wantCode)
+				}
+				if wantRetry != "" && payload.Message != "too many requests are waiting for proofs; retry later" {
+					t.Fatalf("unexpected message: %q", payload.Message)
+				}
+			})
+		}
+	}
+}

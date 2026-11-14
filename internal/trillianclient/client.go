@@ -28,6 +28,20 @@ import (
 // Backend ResourceExhausted errors must not be treated as this rejection.
 var ErrPendingWritesFull = &pendingWritesFullError{}
 
+// ErrProofQueueFull identifies local proof admission rejection. For writes,
+// this can occur after the leaf has already been submitted to Trillian.
+var ErrProofQueueFull = &proofQueueFullError{}
+
+type proofQueueFullError struct{}
+
+func (*proofQueueFullError) Error() string {
+	return "too many requests are waiting for Trillian proofs"
+}
+
+func (e *proofQueueFullError) GRPCStatus() *status.Status {
+	return status.New(codes.ResourceExhausted, e.Error())
+}
+
 // Use a distinct type: gRPC status errors compare equal by code and message,
 // which could otherwise misclassify an identical backend error as local.
 type pendingWritesFullError struct{}

@@ -39,6 +39,7 @@ const (
 	DefaultRootTimeout      = 3 * time.Second
 	DefaultMaxPending       = 1024
 	DefaultProofConcurrency = 32
+	DefaultMaxProofWaiters  = 32
 	errorBackoffMax         = 10 * time.Second
 )
 
@@ -50,6 +51,7 @@ type cacheOptions struct {
 	maxRootAge       time.Duration
 	maxPending       int
 	proofConcurrency int
+	maxProofWaiters  int
 	frozen           bool
 }
 
@@ -74,6 +76,9 @@ func (o cacheOptions) withDefaults() cacheOptions {
 	if o.proofConcurrency <= 0 {
 		o.proofConcurrency = DefaultProofConcurrency
 	}
+	if o.maxProofWaiters <= 0 {
+		o.maxProofWaiters = DefaultMaxProofWaiters
+	}
 	return o
 }
 
@@ -93,13 +98,14 @@ type cachedTrillianClient struct {
 	snapshot    atomic.Pointer[rootSnapshot]
 	lastSuccess atomic.Int64
 
-	pollMu   sync.Mutex
-	mu       sync.Mutex
-	inFlight *pollResult
-	nextPoll *pollResult
-	waiters  sizeWaiters
-	pending  chan struct{}
-	proofs   chan struct{}
+	pollMu       sync.Mutex
+	mu           sync.Mutex
+	inFlight     *pollResult
+	nextPoll     *pollResult
+	waiters      sizeWaiters
+	pending      chan struct{}
+	proofs       chan struct{}
+	proofWaiters chan struct{}
 
 	stop    context.CancelFunc
 	stopped context.Context
@@ -117,6 +123,7 @@ func newCachedTrillianClient(c trillian.TrillianLogClient, logID int64, opts cac
 		nextPoll:             &pollResult{done: make(chan struct{})},
 		pending:              make(chan struct{}, opts.maxPending),
 		proofs:               make(chan struct{}, opts.proofConcurrency),
+		proofWaiters:         make(chan struct{}, opts.maxProofWaiters),
 		stop:                 cancel,
 		stopped:              ctx,
 	}

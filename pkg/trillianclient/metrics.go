@@ -43,6 +43,19 @@ var (
 		Name: "rekor_trillian_proofs_in_flight",
 		Help: "Trillian proof operations currently in flight.",
 	}, []string{"tree_id"})
+	proofWaiters = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rekor_trillian_proof_waiters",
+		Help: "Requests waiting for Trillian proof capacity.",
+	}, []string{"tree_id"})
+	proofWaitDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "rekor_trillian_proof_wait_duration_seconds",
+		Help:    "Time queued for Trillian proof capacity, including canceled waits.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"tree_id"})
+	proofsRejected = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "rekor_trillian_proofs_rejected_total",
+		Help: "Requests rejected because the Trillian proof queue was full.",
+	}, []string{"tree_id"})
 	sizeWaiterCount = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rekor_trillian_size_waiters",
 		Help: "Callers currently waiting for a cached tree-size advance.",
@@ -54,26 +67,32 @@ var (
 )
 
 type cachedClientMetrics struct {
-	pollSuccess   prometheus.Counter
-	pollFailure   prometheus.Counter
-	rootSize      prometheus.Gauge
-	pending       prometheus.Gauge
-	rejected      prometheus.Counter
-	proofs        prometheus.Gauge
-	waiters       prometheus.Gauge
-	waiterBuckets prometheus.Gauge
+	pollSuccess       prometheus.Counter
+	pollFailure       prometheus.Counter
+	rootSize          prometheus.Gauge
+	pending           prometheus.Gauge
+	rejected          prometheus.Counter
+	proofs            prometheus.Gauge
+	proofWaiters      prometheus.Gauge
+	proofWaitDuration prometheus.Observer
+	proofsRejected    prometheus.Counter
+	waiters           prometheus.Gauge
+	waiterBuckets     prometheus.Gauge
 }
 
 func newCachedClientMetrics(treeID int64) cachedClientMetrics {
 	label := strconv.FormatInt(treeID, 10)
 	return cachedClientMetrics{
-		pollSuccess:   rootPolls.WithLabelValues(label, "success"),
-		pollFailure:   rootPolls.WithLabelValues(label, "failure"),
-		rootSize:      rootSize.WithLabelValues(label),
-		pending:       writesPending.WithLabelValues(label),
-		rejected:      writesRejected.WithLabelValues(label),
-		proofs:        proofsInFlight.WithLabelValues(label),
-		waiters:       sizeWaiterCount.WithLabelValues(label),
-		waiterBuckets: sizeBucketCount.WithLabelValues(label),
+		pollSuccess:       rootPolls.WithLabelValues(label, "success"),
+		pollFailure:       rootPolls.WithLabelValues(label, "failure"),
+		rootSize:          rootSize.WithLabelValues(label),
+		pending:           writesPending.WithLabelValues(label),
+		rejected:          writesRejected.WithLabelValues(label),
+		proofs:            proofsInFlight.WithLabelValues(label),
+		proofWaiters:      proofWaiters.WithLabelValues(label),
+		proofWaitDuration: proofWaitDuration.WithLabelValues(label),
+		proofsRejected:    proofsRejected.WithLabelValues(label),
+		waiters:           sizeWaiterCount.WithLabelValues(label),
+		waiterBuckets:     sizeBucketCount.WithLabelValues(label),
 	}
 }

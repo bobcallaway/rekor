@@ -138,6 +138,20 @@ the caller can retry the same entry. The delay is a backoff hint, not a guarante
 that capacity will be available. Other failures can occur after submission, so
 clients should continue to handle duplicate-entry responses on retry.
 
+Cached clients also bound proof admission per tree and process:
+`trillian_log_server.proof_concurrency` permits 32 active operations by default,
+and `trillian_log_server.max_proof_waiters` permits 32 additional waiting requests
+(nonpositive values use the default). When both are full, requests receive HTTP
+503 with `Retry-After: 1`. This applies to reads and writes; a rejected write may
+already have been submitted, so retries must handle duplicate-entry responses.
+Queued requests respect cancellation and caller deadlines. Monitor
+`rekor_trillian_proof_waiters`, `rekor_trillian_proof_wait_duration_seconds`, and
+`rekor_trillian_proofs_rejected_total` alongside `rekor_trillian_proofs_in_flight`
+to distinguish local queueing from backend RPC time. The wait histogram includes
+canceled queued requests but excludes immediate admissions and rejections.
+Lookup misses waiting for a root refresh fail when the cached root exceeds
+`trillian_log_server.sth_max_age`, including while root RPCs are stalled.
+
 Checkpoint caching separately limits distinct signatures in progress with
 `rekor_server.checkpoint_signing_concurrency` (default 32). Requests for the
 same root share signing work even at this limit. Requests for additional roots

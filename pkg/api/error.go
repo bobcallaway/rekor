@@ -94,6 +94,11 @@ func handleRekorAPIError(params any, code int, err error, message string, fields
 	_, creatingEntry := params.(entries.CreateLogEntryParams)
 	overloaded := creatingEntry && errors.Is(err, internalclient.ErrPendingWritesFull)
 	signingOverloaded := errors.Is(err, errCheckpointSigningFull)
+	proofOverloaded := errors.Is(err, internalclient.ErrProofQueueFull)
+	if proofOverloaded {
+		code = http.StatusServiceUnavailable
+		message = "too many requests are waiting for proofs; retry later"
+	}
 	if signingOverloaded {
 		code = http.StatusServiceUnavailable
 		message = "too many checkpoints are being signed; retry later"
@@ -103,7 +108,7 @@ func handleRekorAPIError(params any, code int, err error, message string, fields
 		message = "too many writes are pending; retry later"
 	}
 
-	if signingOverloaded {
+	if signingOverloaded || proofOverloaded {
 		defer func() {
 			response := responder
 			if code == http.StatusServiceUnavailable {

@@ -67,6 +67,7 @@ type CacheConfig struct {
 	MaxRootAge       time.Duration
 	MaxPending       int
 	ProofConcurrency int
+	MaxProofWaiters  int
 	FrozenTreeIDs    map[int64]struct{}
 }
 
@@ -176,6 +177,7 @@ func (cm *ClientManager) GetClient(treeID int64) (internalclient.Client, error) 
 			maxRootAge:       cm.cache.MaxRootAge,
 			maxPending:       cm.cache.MaxPending,
 			proofConcurrency: cm.cache.ProofConcurrency,
+			maxProofWaiters:  cm.cache.MaxProofWaiters,
 			frozen:           frozen,
 		})
 	}
