@@ -26,6 +26,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/sigstore/rekor/pkg/signer"
 	"github.com/sigstore/rekor/pkg/util"
 	"github.com/sigstore/sigstore/pkg/signature"
 	"github.com/stretchr/testify/require"
@@ -365,4 +366,51 @@ func TestCheckpointCacheRecoversFromSignerPanic(t *testing.T) {
 		require.Len(t, cache.entries, 1)
 		require.EqualValues(t, 1, healthy.calls.Load())
 	})
+}
+
+func TestResolveCheckpointSigningTimeout(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured time.Duration
+		sc         signer.SigningConfig
+		want       time.Duration
+	}{
+		{
+			name: "non-gcp signer uses default",
+			sc:   signer.SigningConfig{SigningSchemeOrKeyPath: "memory", GCPKMSTimeout: 20, GCPKMSRetries: 5},
+			want: DefaultCheckpointSigningTimeout,
+		},
+		{
+			name: "gcp signer without per-call timeout uses default",
+			sc:   signer.SigningConfig{SigningSchemeOrKeyPath: "gcpkms://projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", GCPKMSRetries: 5},
+			want: DefaultCheckpointSigningTimeout,
+		},
+		{
+			name: "gcp budget below default keeps default",
+			sc:   signer.SigningConfig{SigningSchemeOrKeyPath: "gcpkms://projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", GCPKMSTimeout: 5, GCPKMSRetries: 2},
+			want: DefaultCheckpointSigningTimeout,
+		},
+		{
+			name: "gcp budget above default expands derived timeout",
+			sc:   signer.SigningConfig{SigningSchemeOrKeyPath: "gcpkms://projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", GCPKMSTimeout: 15, GCPKMSRetries: 3},
+			want: 60 * time.Second,
+		},
+		{
+			name:       "explicit timeout shorter than gcp budget is preserved",
+			configured: 10 * time.Second,
+			sc:         signer.SigningConfig{SigningSchemeOrKeyPath: "gcpkms://projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", GCPKMSTimeout: 15, GCPKMSRetries: 3},
+			want:       10 * time.Second,
+		},
+		{
+			name: "overflowing gcp budget saturates safely",
+			sc:   signer.SigningConfig{SigningSchemeOrKeyPath: "gcpkms://projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", GCPKMSTimeout: ^uint(0), GCPKMSRetries: ^uint(0)},
+			want: maxSigningDuration,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, resolveCheckpointSigningTimeout(tt.configured, tt.sc, true))
+		})
+	}
 }

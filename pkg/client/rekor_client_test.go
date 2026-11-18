@@ -249,9 +249,11 @@ func TestRetryBackoff(t *testing.T) {
 		{name: "first retry", lower: time.Second, upper: 1250 * time.Millisecond},
 		{name: "exponential", attempt: 2, lower: 4 * time.Second, upper: 5 * time.Second},
 		{name: "bounded", attempt: 10, lower: 30 * time.Second, upper: 30 * time.Second},
-		{name: "503 retry after", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"60"}}}, lower: time.Minute, upper: time.Minute + time.Second},
+		{name: "503 retry after within max", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"10"}}}, lower: 10 * time.Second, upper: 11 * time.Second},
+		{name: "503 retry after capped at max", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"60"}}}, lower: 30 * time.Second, upper: 30 * time.Second},
 		{name: "429 retry after", response: &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": {"1"}}}, lower: time.Second, upper: 1250 * time.Millisecond},
-		{name: "HTTP date", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {time.Now().Add(time.Minute).UTC().Format(http.TimeFormat)}}}, lower: 58 * time.Second, upper: 61 * time.Second},
+		{name: "HTTP date within max", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat)}}}, lower: 8 * time.Second, upper: 11 * time.Second},
+		{name: "HTTP date capped at max", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {time.Now().Add(time.Minute).UTC().Format(http.TimeFormat)}}}, lower: 30 * time.Second, upper: 30 * time.Second},
 		{name: "zero header uses fallback", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"0"}}}, lower: time.Second, upper: 1250 * time.Millisecond},
 		{name: "invalid header", response: &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"invalid"}}}, lower: time.Second, upper: 1250 * time.Millisecond},
 		{name: "500 ignores header", response: &http.Response{StatusCode: 500, Header: http.Header{"Retry-After": {"60"}}}, lower: time.Second, upper: 1250 * time.Millisecond},
@@ -268,6 +270,16 @@ func TestRetryBackoff(t *testing.T) {
 	}
 	if got := retryBackoff(0, 0, 0, nil); got != 0 {
 		t.Fatalf("explicit zero delay: got %v", got)
+	}
+	retryAfterResp := &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"60"}}}
+	if got := retryBackoff(0, 30*time.Second, 0, retryAfterResp); got != 0 {
+		t.Fatalf("explicit zero min delay with Retry-After: got %v", got)
+	}
+	if got := retryBackoff(time.Second, 0, 0, retryAfterResp); got != 0 {
+		t.Fatalf("explicit zero max delay with Retry-After: got %v", got)
+	}
+	if got := retryBackoff(time.Second, 2500*time.Millisecond, 0, &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": {"2"}}}); got < 2*time.Second || got > 2500*time.Millisecond {
+		t.Fatalf("jittered Retry-After exceeded max: got %v", got)
 	}
 }
 

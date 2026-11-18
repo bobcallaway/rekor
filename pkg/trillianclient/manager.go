@@ -71,6 +71,21 @@ type CacheConfig struct {
 	FrozenTreeIDs    map[int64]struct{}
 }
 
+// Validate checks that explicit cache timing settings are consistent.
+func (c CacheConfig) Validate() error {
+	pollInterval := c.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = DefaultPollInterval
+	}
+	if c.MaxRootAge < 0 {
+		return fmt.Errorf("max root age (%s) must not be negative", c.MaxRootAge)
+	}
+	if c.MaxRootAge > 0 && c.MaxRootAge <= pollInterval {
+		return fmt.Errorf("max root age (%s) must be greater than poll interval (%s)", c.MaxRootAge, pollInterval)
+	}
+	return nil
+}
+
 // NewClientManager creates a new ClientManager.
 func NewClientManager(treeIDToConfig map[int64]GRPCConfig, defaultConfig GRPCConfig) *ClientManager {
 	return newClientManager(treeIDToConfig, defaultConfig, nil)

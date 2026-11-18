@@ -115,3 +115,45 @@ func TestClientManagerCopiesConfigurationAndRejectsAfterClose(t *testing.T) {
 	_, err := manager.GetClient(1)
 	require.ErrorContains(t, err, "shutting down")
 }
+
+func TestCacheConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     CacheConfig
+		wantErr string
+	}{
+		{
+			name: "zero values derive valid defaults",
+			cfg:  CacheConfig{},
+		},
+		{
+			name: "max root age greater than poll interval",
+			cfg:  CacheConfig{PollInterval: 200 * time.Millisecond, MaxRootAge: time.Second},
+		},
+		{
+			name:    "max root age equal to default poll interval",
+			cfg:     CacheConfig{MaxRootAge: DefaultPollInterval},
+			wantErr: "must be greater than poll interval",
+		},
+		{
+			name:    "max root age smaller than custom poll interval",
+			cfg:     CacheConfig{PollInterval: 500 * time.Millisecond, MaxRootAge: 250 * time.Millisecond},
+			wantErr: "must be greater than poll interval",
+		},
+		{
+			name:    "negative max root age",
+			cfg:     CacheConfig{MaxRootAge: -time.Second},
+			wantErr: "must not be negative",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}

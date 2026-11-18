@@ -21,19 +21,66 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/sigstore/rekor/pkg/log"
+	"github.com/sigstore/rekor/pkg/signer"
 	"github.com/sigstore/rekor/pkg/util"
 	"github.com/sigstore/sigstore/pkg/signature"
+	"github.com/sigstore/sigstore/pkg/signature/kms/gcp"
 )
 
 const (
 	DefaultCheckpointCacheEntries       = 128
 	DefaultCheckpointSigningConcurrency = 32
 	DefaultCheckpointSigningTimeout     = 30 * time.Second
+	maxSigningDuration                  = time.Duration(1<<63 - 1)
 )
+
+// gcpKMSSigningBudget returns the total per-call timeout budget configured for
+// GCP KMS retries, or 0 if the signer is not GCP KMS or has no per-call timeout.
+func gcpKMSSigningBudget(sc signer.SigningConfig) time.Duration {
+	if !strings.HasPrefix(sc.SigningSchemeOrKeyPath, gcp.ReferenceScheme) || sc.GCPKMSTimeout == 0 {
+		return 0
+	}
+	maxSec := uint64(maxSigningDuration / time.Second)
+	if uint64(sc.GCPKMSRetries) >= maxSec {
+		return maxSigningDuration
+	}
+	attempts := uint64(sc.GCPKMSRetries) + 1
+	timeoutSec := uint64(sc.GCPKMSTimeout)
+	if timeoutSec > maxSec/attempts {
+		return maxSigningDuration
+	}
+	return time.Duration(timeoutSec*attempts) * time.Second
+}
+
+// resolveCheckpointSigningTimeout derives the effective shared checkpoint
+// signing timeout. When configured is <= 0, it defaults to at least
+// DefaultCheckpointSigningTimeout and expands to cover any larger configured
+// GCP KMS retry budget. When configured is positive but shorter than that
+// budget while checkpoint caching is enabled, the explicit value is preserved
+// and a startup warning is logged.
+func resolveCheckpointSigningTimeout(configured time.Duration, sc signer.SigningConfig, cacheEnabled bool) time.Duration {
+	budget := gcpKMSSigningBudget(sc)
+	if configured <= 0 {
+		if budget > DefaultCheckpointSigningTimeout {
+			return budget
+		}
+		return DefaultCheckpointSigningTimeout
+	}
+	if cacheEnabled && budget > configured {
+		log.Logger.Warnw("checkpoint signing timeout is shorter than configured GCP KMS retry budget; shared checkpoint signing may time out before retries finish",
+			"checkpointSigningTimeout", configured,
+			"gcpKMSTimeoutSeconds", sc.GCPKMSTimeout,
+			"gcpKMSRetries", sc.GCPKMSRetries,
+			"gcpKMSBudget", budget,
+		)
+	}
+	return configured
+}
 
 var errCheckpointSigningFull = errors.New("too many checkpoints are being signed")
 

@@ -125,7 +125,7 @@ func NewAPI(treeID int64) (*API, error) {
 	}
 	var tcm *trillianclient.ClientManager
 	if viper.GetBool("trillian_log_server.cache_sth") {
-		tcm = trillianclient.NewCachedClientManager(inactiveGRPCConfigs, defaultGRPCConfig, trillianclient.CacheConfig{
+		cacheCfg := trillianclient.CacheConfig{
 			PollInterval:     viper.GetDuration("trillian_log_server.sth_poll_interval"),
 			RootTimeout:      viper.GetDuration("trillian_log_server.root_rpc_timeout"),
 			MaxRootAge:       viper.GetDuration("trillian_log_server.sth_max_age"),
@@ -133,10 +133,22 @@ func NewAPI(treeID int64) (*API, error) {
 			ProofConcurrency: viper.GetInt("trillian_log_server.proof_concurrency"),
 			MaxProofWaiters:  viper.GetInt("trillian_log_server.max_proof_waiters"),
 			FrozenTreeIDs:    frozenTreeIDs,
-		})
+		}
+		if err := cacheCfg.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid cached Trillian client config: %w", err)
+		}
+		tcm = trillianclient.NewCachedClientManager(inactiveGRPCConfigs, defaultGRPCConfig, cacheCfg)
 	} else {
 		tcm = trillianclient.NewClientManager(inactiveGRPCConfigs, defaultGRPCConfig)
 	}
+	initSucceeded := false
+	defer func() {
+		if !initSucceeded {
+			if closeErr := tcm.Close(); closeErr != nil {
+				log.Logger.Errorf("closing trillian client manager after init failure: %v", closeErr)
+			}
+		}
+	}()
 
 	roots, err := ranges.CompleteInitialization(ctx, tcm)
 	if err != nil {
@@ -196,6 +208,14 @@ func NewAPI(treeID int64) (*API, error) {
 		log.ContextLogger(ctx).Infof("Initialized new entry event publisher: %s", p)
 	}
 
+	checkpointCacheEntries := viper.GetInt("rekor_server.checkpoint_cache_entries")
+	checkpointSigningTimeout := resolveCheckpointSigningTimeout(
+		viper.GetDuration("rekor_server.checkpoint_signing_timeout"),
+		ranges.GetActive().SigningConfig,
+		checkpointCacheEntries != 0,
+	)
+
+	initSucceeded = true
 	return &API{
 		// Transparency Log Stuff
 		trillianClientManager: tcm,
@@ -203,7 +223,7 @@ func NewAPI(treeID int64) (*API, error) {
 		// Utility functionality not required for operation of the core service
 		newEntryPublisher:     newEntryPublisher,
 		algorithmRegistry:     algorithmRegistry,
-		checkpointCache:       newCheckpointCache(viper.GetInt("rekor_server.checkpoint_cache_entries"), viper.GetDuration("rekor_server.checkpoint_signing_timeout"), viper.GetInt("rekor_server.checkpoint_signing_concurrency")),
+		checkpointCache:       newCheckpointCache(checkpointCacheEntries, checkpointSigningTimeout, viper.GetInt("rekor_server.checkpoint_signing_concurrency")),
 		cachedCheckpoints:     cachedCheckpoints,
 		checkpointHostname:    checkpointHostname,
 		publishEventsProtobuf: publishEventsProtobuf,
