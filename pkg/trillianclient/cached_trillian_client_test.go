@@ -367,3 +367,17 @@ func TestCachedAddRejectsSaturationBeforeBackendCalls(t *testing.T) {
 	require.Nil(t, response.GetAddResult)
 	require.Len(t, tc.pending, 1)
 }
+
+func TestCacheDefaultsSurviveOneTimedOutPoll(t *testing.T) {
+	o := cacheOptions{}.withDefaults()
+	// A poll starting one interval after the last success times out, the
+	// first retry waits at most two intervals (jittered backoff), and the
+	// retry itself may take a full timeout.
+	worstRecovery := o.pollInterval + o.rootTimeout + 2*o.pollInterval + o.rootTimeout
+	require.Greater(t, o.maxRootAge, worstRecovery)
+	// Jitter can double a pause; the longest still fits inside the window.
+	require.Less(t, 2*o.retryMax(), o.maxRootAge)
+
+	slow := cacheOptions{pollInterval: time.Minute, maxRootAge: time.Second}.withDefaults()
+	require.Equal(t, time.Minute, slow.retryMax())
+}

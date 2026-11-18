@@ -82,7 +82,8 @@ func (o cacheOptions) withDefaults() cacheOptions {
 		o.rootTimeout = DefaultRootTimeout
 	}
 	if o.maxRootAge <= 0 {
-		o.maxRootAge = o.rootTimeout + 3*o.pollInterval
+		// Survive one timed-out poll followed by a slow but successful retry.
+		o.maxRootAge = 2*o.rootTimeout + 4*o.pollInterval
 	}
 	if o.maxPending <= 0 {
 		o.maxPending = DefaultMaxPending

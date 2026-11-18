@@ -167,7 +167,7 @@ func TestProofAdmissionUsesRootPublishedWhileWaiting(t *testing.T) {
 
 func TestPollRetryCapRespectsFreshnessAndInterval(t *testing.T) {
 	defaults := cacheOptions{}.withDefaults()
-	require.Equal(t, 3300*time.Millisecond, defaults.maxRootAge) // Preserve the existing freshness policy.
+	require.Equal(t, 6400*time.Millisecond, defaults.maxRootAge)
 	for _, o := range []cacheOptions{defaults, {pollInterval: time.Millisecond, maxRootAge: time.Second}, {pollInterval: time.Second, maxRootAge: time.Minute}, {pollInterval: time.Minute, maxRootAge: time.Second}} {
 		b := backoff.Backoff{Min: o.pollInterval, Max: o.retryMax(), Factor: 2, Jitter: true}
 		for range 30 {

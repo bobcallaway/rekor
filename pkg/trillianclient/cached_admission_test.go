@@ -52,7 +52,11 @@ func TestCachedLookupMissExpiresDuringStalledPolls(t *testing.T) {
 				backend.inclusion = func(context.Context, *trillian.GetInclusionProofByHashRequest) (*trillian.GetInclusionProofByHashResponse, error) {
 					return nil, status.Error(codes.NotFound, "not integrated")
 				}
-				tc := newCachedTrillianClient(backend, 47, cacheOptions{})
+				tc := newCachedTrillianClient(backend, 47, cacheOptions{
+					pollInterval: DefaultPollInterval,
+					rootTimeout:  5 * time.Second,
+					maxRootAge:   2 * time.Second,
+				})
 				defer tc.Close()
 				synctest.Wait()
 				time.Sleep(150 * time.Millisecond)
