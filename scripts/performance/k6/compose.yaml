@@ -12,6 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+x-rekor-common: &rekor-common
+  image: rekor-rekor-server:latest
+  cpus: 2
+  volumes:
+    - ${PERF_DIR:-.}:/bench:ro
+  entrypoint: [/bench/rekor-server]
+  depends_on:
+    trillian: {condition: service_started}
+    signer: {condition: service_started}
+
 services:
   mysql:
     image: gcr.io/trillian-opensource-ci/db_server:v1.4.0
@@ -49,15 +59,13 @@ services:
     depends_on:
       mysql: {condition: service_healthy}
   rekor:
-    image: rekor-rekor-server:latest
-    cpus: 2
-    volumes:
-      - ${PERF_DIR:-.}:/bench:ro
-    entrypoint: [/bench/rekor-server]
+    <<: *rekor-common
     command:
       - serve
       - --trillian_log_server.address=trillian
       - --trillian_log_server.port=8090
+      - --trillian_log_server.tlog_id=${ACTIVE_TREE_ID:-0}
+      - --trillian_log_server.sharding_config=${SHARDING_CONFIG:-}
       - --rekor_server.address=0.0.0.0
       - --rekor_server.hostname=benchmark.local
       - --rekor_server.signer=memory
@@ -67,12 +75,45 @@ services:
       - --log_type=prod
       - --trillian_log_server.cache_sth=${CACHE_STH:-false}
       - --trillian_log_server.sth_poll_interval=${POLL_INTERVAL:-100ms}
+      - --trillian_log_server.root_rpc_timeout=${ROOT_TIMEOUT:-3s}
+      - --trillian_log_server.sth_max_age=${MAX_ROOT_AGE:-0s}
+      - --trillian_log_server.max_pending_writes=${MAX_PENDING:-1024}
       - --trillian_log_server.proof_concurrency=${PROOF_CONCURRENCY:-32}
+      - --trillian_log_server.max_proof_waiters=${MAX_PROOF_WAITERS:-32}
       - --rekor_server.checkpoint_cache_entries=${CHECKPOINT_ENTRIES:-128}
+      - --rekor_server.checkpoint_signing_concurrency=${CHECKPOINT_SIGNING_CONCURRENCY:-32}
+      - --rekor_server.checkpoint_signing_timeout=${CHECKPOINT_SIGNING_TIMEOUT:-0s}
     ports:
       - 127.0.0.1:13000:3000
       - 127.0.0.1:12112:2112
       - 127.0.0.1:16060:6060
-    depends_on:
-      trillian: {condition: service_started}
-      signer: {condition: service_started}
+  rekor2:
+    <<: *rekor-common
+    profiles: [multi]
+    command:
+      - serve
+      - --trillian_log_server.address=trillian
+      - --trillian_log_server.port=8090
+      - --trillian_log_server.tlog_id=${ACTIVE_TREE_ID:-0}
+      - --trillian_log_server.sharding_config=${SHARDING_CONFIG:-}
+      - --rekor_server.address=0.0.0.0
+      - --rekor_server.hostname=benchmark.local
+      - --rekor_server.signer=memory
+      - --search_index.storage_provider=mysql
+      - --search_index.mysql.dsn=test:zaphod@tcp(mysql:3306)/test?parseTime=true&interpolateParams=true
+      - --enable_pprof
+      - --log_type=prod
+      - --trillian_log_server.cache_sth=${CACHE_STH:-false}
+      - --trillian_log_server.sth_poll_interval=${POLL_INTERVAL:-100ms}
+      - --trillian_log_server.root_rpc_timeout=${ROOT_TIMEOUT:-3s}
+      - --trillian_log_server.sth_max_age=${MAX_ROOT_AGE:-0s}
+      - --trillian_log_server.max_pending_writes=${MAX_PENDING:-1024}
+      - --trillian_log_server.proof_concurrency=${PROOF_CONCURRENCY:-32}
+      - --trillian_log_server.max_proof_waiters=${MAX_PROOF_WAITERS:-32}
+      - --rekor_server.checkpoint_cache_entries=${CHECKPOINT_ENTRIES:-128}
+      - --rekor_server.checkpoint_signing_concurrency=${CHECKPOINT_SIGNING_CONCURRENCY:-32}
+      - --rekor_server.checkpoint_signing_timeout=${CHECKPOINT_SIGNING_TIMEOUT:-0s}
+    ports:
+      - 127.0.0.1:13001:3000
+      - 127.0.0.1:12113:2112
+      - 127.0.0.1:16061:6060
