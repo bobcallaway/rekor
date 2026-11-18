@@ -19,7 +19,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"fmt"
 
 	"github.com/google/trillian"
 	"github.com/google/trillian/client"
@@ -83,8 +82,7 @@ func getProofByHash(ctx context.Context, c trillian.TrillianLogClient, verifier 
 		return &internalclient.Response{Status: status.Code(err), Err: err}
 	}
 	if resp == nil {
-		err := fmt.Errorf("trillian returned no proof for hash %s", hex.EncodeToString(hash))
-		return &internalclient.Response{Status: status.Code(err), Err: err}
+		return responseError(status.Errorf(codes.Internal, "trillian returned no proof for hash %s", hex.EncodeToString(hash)))
 	}
 	if len(resp.Proof) == 0 {
 		return responseError(status.Errorf(codes.NotFound, "no proof for hash %x in tree size %d", hash, snap.root.TreeSize))
@@ -116,12 +114,10 @@ func getLeafForProof(ctx context.Context, c trillian.TrillianLogClient, logID, i
 		return &internalclient.Response{Status: status.Code(err), Err: err}
 	}
 	if resp == nil || len(resp.Leaves) == 0 {
-		err := fmt.Errorf("no leaf returned for index %d", index)
-		return &internalclient.Response{Status: codes.NotFound, Err: err}
+		return responseError(status.Errorf(codes.NotFound, "no leaf returned for index %d", index))
 	}
 	if len(resp.Leaves) != 1 {
-		err := fmt.Errorf("multiple leaves returned for index %d", index)
-		return &internalclient.Response{Status: codes.FailedPrecondition, Err: err}
+		return responseError(status.Errorf(codes.FailedPrecondition, "multiple leaves returned for index %d", index))
 	}
 	leaf := resp.Leaves[0]
 	if err := checkLeaf(leaf, index, hash); err != nil {
@@ -147,13 +143,13 @@ func getEntryAndProof(ctx context.Context, c trillian.TrillianLogClient, verifie
 		return &internalclient.Response{Status: status.Code(err), Err: err}
 	}
 	if resp == nil || resp.Proof == nil {
-		return &internalclient.Response{Status: codes.NotFound, Err: fmt.Errorf("trillian returned no proof for index %d", index)}
+		return responseError(status.Errorf(codes.NotFound, "trillian returned no proof for index %d", index))
 	}
 	if resp.Leaf == nil {
-		return &internalclient.Response{Status: codes.Internal, Err: fmt.Errorf("trillian returned a proof with no leaf for index %d", index)}
+		return responseError(status.Errorf(codes.Internal, "trillian returned a proof with no leaf for index %d", index))
 	}
 	if resp.Proof.LeafIndex != index {
-		return &internalclient.Response{Status: codes.Internal, Err: fmt.Errorf("trillian returned a proof for index %d, want %d", resp.Proof.LeafIndex, index)}
+		return responseError(status.Errorf(codes.Internal, "trillian returned a proof for index %d, want %d", resp.Proof.LeafIndex, index))
 	}
 	if err := checkLeaf(resp.Leaf, index, resp.Leaf.MerkleLeafHash); err != nil {
 		return responseError(err)

@@ -20,9 +20,11 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
+	"github.com/sigstore/rekor/pkg/log"
 	"github.com/sigstore/rekor/pkg/util"
 	"github.com/sigstore/sigstore/pkg/signature"
 )
@@ -153,25 +155,38 @@ func (c *checkpointCache) sign(ctx context.Context, hostname string, treeID int6
 }
 
 func (c *checkpointCache) complete(ctx context.Context, key checkpointKey, call *checkpointCall, hostname string, signer signature.Signer) {
+	completed := false
+	defer func() {
+		if r := recover(); r != nil {
+			call.value = ""
+			call.err = fmt.Errorf("checkpoint signing panicked: %v", r)
+			log.Logger.Errorw("checkpoint signing panicked", "treeID", key.treeID, "treeSize", key.treeSize, "panic", r, "stack", string(debug.Stack()))
+		} else if !completed {
+			call.value = ""
+			call.err = errors.New("checkpoint signing terminated unexpectedly")
+		}
+
+		c.mu.Lock()
+		c.inFlight--
+		if call.err != nil {
+			delete(c.entries, key)
+			checkpointCacheRequests.WithLabelValues("sign_error").Inc()
+		} else if len(c.completed) < c.maxEntries {
+			c.completed = append(c.completed, key)
+		} else {
+			delete(c.entries, c.completed[c.nextEvict])
+			c.completed[c.nextEvict] = key
+			c.nextEvict = (c.nextEvict + 1) % c.maxEntries
+		}
+		close(call.done)
+		c.mu.Unlock()
+	}()
+
 	call.value, call.err = createCheckpoint(ctx, hostname, key.treeID, key.treeSize, key.rootHash[:], signer)
 	if err := ctx.Err(); err != nil {
 		call.value, call.err = "", err
 	}
-
-	c.mu.Lock()
-	c.inFlight--
-	if call.err != nil {
-		delete(c.entries, key)
-		checkpointCacheRequests.WithLabelValues("sign_error").Inc()
-	} else if len(c.completed) < c.maxEntries {
-		c.completed = append(c.completed, key)
-	} else {
-		delete(c.entries, c.completed[c.nextEvict])
-		c.completed[c.nextEvict] = key
-		c.nextEvict = (c.nextEvict + 1) % c.maxEntries
-	}
-	close(call.done)
-	c.mu.Unlock()
+	completed = true
 }
 
 func createCheckpoint(ctx context.Context, hostname string, treeID int64, treeSize uint64, rootHash []byte, signer signature.Signer) (string, error) {

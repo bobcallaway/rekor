@@ -139,12 +139,15 @@ that capacity will be available. Other failures can occur after submission, so
 clients should continue to handle duplicate-entry responses on retry.
 
 Cached clients also bound proof admission per tree and process:
-`trillian_log_server.proof_concurrency` permits 32 active operations by default,
-and `trillian_log_server.max_proof_waiters` permits 32 additional waiting requests
-(nonpositive values use the default). When both are full, requests receive HTTP
-503 with `Retry-After: 1`. This applies to reads and writes; a rejected write may
-already have been submitted, so retries must handle duplicate-entry responses.
-Queued requests respect cancellation and caller deadlines. Monitor
+`trillian_log_server.proof_concurrency` permits 32 active operations by default
+across reads and writes, and `trillian_log_server.max_proof_waiters` permits 32
+additional waiting read requests (nonpositive values use the default). When both
+are full, excess read requests receive HTTP 503 with `Retry-After: 1`. Writes
+that have already been admitted under `trillian_log_server.max_pending_writes`
+and submitted to Trillian wait directly for proof concurrency (bounded by
+`max_pending_writes`, caller deadlines, client shutdown, and root freshness)
+rather than failing against the read waiter cap when a sequenced batch wakes up
+together. Queued requests respect cancellation and caller deadlines. Monitor
 `rekor_trillian_proof_waiters`, `rekor_trillian_proof_wait_duration_seconds`, and
 `rekor_trillian_proofs_rejected_total` alongside `rekor_trillian_proofs_in_flight`
 to distinguish local queueing from backend RPC time. The wait histogram includes
@@ -152,7 +155,7 @@ canceled queued requests but excludes immediate admissions and rejections.
 After a queued write's inclusion-proof lookup misses, the cached client retries
 when the tree grows or after ten polling intervals (one second by default),
 whichever happens first. This lets transient misses recover even on a quiet log.
-Retries retain the pending-write slot, reacquire proof capacity, and stop on
+Retries retain the pending-write slot, reacquire proof concurrency, and stop on
 request cancellation, client shutdown, stale roots, or non-miss errors.
 
 Lookup misses waiting for a root refresh fail when the cached root exceeds

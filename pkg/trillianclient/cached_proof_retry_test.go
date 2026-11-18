@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/trillian"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	internalclient "github.com/sigstore/rekor/internal/trillianclient"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -93,13 +94,15 @@ func TestCachedAddRetriesProofMissWithoutGrowth(t *testing.T) {
 				synctest.Wait()
 				require.EqualValues(t, 2, calls.Load())
 
-				// A retry must acquire capacity again, even though this write was
-				// admitted before the competing proof operation started.
+				// A retry must acquire proof concurrency again, even though this write
+				// was admitted before the competing proof operation started, without
+				// consuming the read proofWaiters queue.
 				require.NoError(t, tc.acquireProof(context.Background()))
 				time.Sleep(retryAfter)
 				synctest.Wait()
 				require.EqualValues(t, 2, calls.Load())
-				require.Len(t, tc.proofWaiters, 1)
+				require.Empty(t, tc.proofWaiters)
+				require.EqualValues(t, 1, testutil.ToFloat64(tc.metrics.proofWaiters))
 				tc.releaseProof()
 				resp := <-done
 				requireVerifiedRead(t, resp, tree, 0, 1)
@@ -108,6 +111,7 @@ func TestCachedAddRetriesProofMissWithoutGrowth(t *testing.T) {
 				require.Empty(t, tc.pending)
 				require.Empty(t, tc.proofs)
 				require.Empty(t, tc.proofWaiters)
+				require.Zero(t, testutil.ToFloat64(tc.metrics.proofWaiters))
 				require.Zero(t, tc.waiters.waiterCount())
 			})
 		})
@@ -115,12 +119,15 @@ func TestCachedAddRetriesProofMissWithoutGrowth(t *testing.T) {
 }
 
 func TestCachedAddProofRetryStops(t *testing.T) {
-	for _, reason := range []string{"cancel", "deadline", "close", "stale", "backend error", "overload"} {
+	for _, reason := range []string{"cancel", "deadline", "close", "stale", "backend error", "stale while waiting for proof"} {
 		t.Run(reason, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				opts := cacheOptions{proofConcurrency: 1, maxProofWaiters: 1}
 				if reason == "stale" {
 					opts.maxRootAge = 250 * time.Millisecond
+				}
+				if reason == "stale while waiting for proof" {
+					opts.maxRootAge = 1500 * time.Millisecond
 				}
 				tc, backend, _ := newQuietLogWriter(t, opts)
 				defer tc.Close()
@@ -157,7 +164,7 @@ func TestCachedAddProofRetryStops(t *testing.T) {
 				case "backend error":
 					time.Sleep(tc.opts.addLeafRetryAfter())
 					wantCalls = 2
-				case "overload":
+				case "stale while waiting for proof":
 					require.NoError(t, tc.acquireProof(context.Background()))
 					defer tc.releaseProof()
 					waiting := make(chan error, 1)
@@ -165,11 +172,19 @@ func TestCachedAddProofRetryStops(t *testing.T) {
 					defer stopWaiting()
 					go func() { waiting <- tc.acquireProof(waitCtx) }()
 					synctest.Wait()
+					// Filling the read waiter queue does not reject the retrying write;
+					// it waits for proof concurrency and expires when the root goes stale.
 					time.Sleep(tc.opts.addLeafRetryAfter())
 					synctest.Wait()
+					require.EqualValues(t, 2, testutil.ToFloat64(tc.metrics.proofWaiters))
+					select {
+					case resp := <-done:
+						t.Fatalf("retrying write failed early while read waiter queue was full: %+v", resp)
+					default:
+					}
+					time.Sleep(opts.maxRootAge - tc.opts.addLeafRetryAfter() + time.Millisecond)
 					stopWaiting()
 					require.Equal(t, codes.Canceled, status.Code(<-waiting))
-					want = codes.ResourceExhausted
 				}
 				resp := <-done
 				require.Equal(t, want, resp.Status)
@@ -181,4 +196,30 @@ func TestCachedAddProofRetryStops(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestCachedAddRetriesEmptyLeafLookup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tc, backend, tree := newQuietLogWriter(t, cacheOptions{proofConcurrency: 1, maxProofWaiters: 1})
+		defer tc.Close()
+		backend.inclusion = func(context.Context, *trillian.GetInclusionProofByHashRequest) (*trillian.GetInclusionProofByHashResponse, error) {
+			return &trillian.GetInclusionProofByHashResponse{Proof: []*trillian.Proof{{LeafIndex: 0, Hashes: tree.inclusion(0, 1)}}}, nil
+		}
+		var leafCalls atomic.Int32
+		backend.leaves = func(context.Context, *trillian.GetLeavesByRangeRequest) (*trillian.GetLeavesByRangeResponse, error) {
+			if leafCalls.Add(1) == 1 {
+				return &trillian.GetLeavesByRangeResponse{}, nil
+			}
+			return &trillian.GetLeavesByRangeResponse{Leaves: []*trillian.LogLeaf{testIntegratedLeaf(tree, 0)}}, nil
+		}
+		done := make(chan *internalclient.Response, 1)
+		go func() { done <- tc.AddLeaf(context.Background(), []byte("leaf-0")) }()
+		synctest.Wait()
+		require.EqualValues(t, 1, leafCalls.Load())
+		time.Sleep(tc.opts.addLeafRetryAfter())
+		resp := <-done
+		requireVerifiedRead(t, resp, tree, 0, 1)
+		require.NotNil(t, resp.GetAddResult)
+		require.EqualValues(t, 2, leafCalls.Load())
+	})
 }

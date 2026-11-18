@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/transparency-dev/merkle/rfc6962"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestVerifiedReadsRejectUnboundLeaf(t *testing.T) {
@@ -109,8 +110,65 @@ func TestDirectAddRejectsMissingQueuedLeaf(t *testing.T) {
 		backend := &controlledLogClient{queue: func(context.Context, *trillian.QueueLeafRequest) (*trillian.QueueLeafResponse, error) {
 			return resp, nil
 		}}
-		require.Equal(t, codes.Internal, newDirectTrillianClient(backend, 47).AddLeaf(context.Background(), []byte("leaf-0")).Status)
+		got := newDirectTrillianClient(backend, 47).AddLeaf(context.Background(), []byte("leaf-0"))
+		require.Equal(t, codes.Internal, got.Status)
+		require.Equal(t, codes.Internal, status.Code(got.Err))
 	}
+}
+
+func TestAddPreservesNonOKQueuedStatusWithoutLeaf(t *testing.T) {
+	tree := newLogTree(t, 1)
+	for _, cached := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct", true: "cached"}[cached], func(t *testing.T) {
+			backend := &controlledLogClient{queue: func(context.Context, *trillian.QueueLeafRequest) (*trillian.QueueLeafResponse, error) {
+				return &trillian.QueueLeafResponse{
+					QueuedLeaf: &trillian.QueuedLogLeaf{
+						Status: status.New(codes.AlreadyExists, "duplicate leaf").Proto(),
+					},
+				}, nil
+			}}
+			var tc internalclient.Client = newDirectTrillianClient(backend, 47)
+			if cached {
+				c := newManuallyPolledClient(backend, cacheOptions{})
+				t.Cleanup(c.Close)
+				_, err := c.publish(rootSnapshot{root: mustRoot(t, tree, 1), signed: mkSLR(t, 1, tree.root(1))})
+				require.NoError(t, err)
+				tc = c
+			}
+			got := tc.AddLeaf(context.Background(), []byte("leaf-0"))
+			require.Equal(t, codes.OK, got.Status)
+			require.NoError(t, got.Err)
+			require.NotNil(t, got.GetAddResult)
+			require.NotNil(t, got.GetAddResult.QueuedLeaf)
+			require.NotNil(t, got.GetAddResult.QueuedLeaf.Status)
+			require.EqualValues(t, codes.AlreadyExists, got.GetAddResult.QueuedLeaf.Status.Code)
+		})
+	}
+}
+
+func TestVerifiedReadErrorCodesMatchStatus(t *testing.T) {
+	tree := newLogTree(t, 2)
+	snap := rootSnapshot{root: mustRoot(t, tree, 2), signed: mkSLR(t, 2, tree.root(2))}
+	proof := &trillian.Proof{LeafIndex: 0, Hashes: tree.inclusion(0, 2)}
+	verifier := client.NewLogVerifier(rfc6962.DefaultHasher)
+
+	emptyLeaves := &controlledLogClient{
+		leaves: func(context.Context, *trillian.GetLeavesByRangeRequest) (*trillian.GetLeavesByRangeResponse, error) {
+			return &trillian.GetLeavesByRangeResponse{}, nil
+		},
+	}
+	got := getLeafForProof(context.Background(), emptyLeaves, 47, 0, tree.leafHash(0), proof, snap.signed)
+	require.Equal(t, codes.NotFound, got.Status)
+	require.Equal(t, codes.NotFound, status.Code(got.Err))
+
+	emptyEntry := &controlledLogClient{
+		entry: func(context.Context, *trillian.GetEntryAndProofRequest) (*trillian.GetEntryAndProofResponse, error) {
+			return &trillian.GetEntryAndProofResponse{}, nil
+		},
+	}
+	got = getEntryAndProof(context.Background(), emptyEntry, verifier, 47, 0, snap)
+	require.Equal(t, codes.NotFound, got.Status)
+	require.Equal(t, codes.NotFound, status.Code(got.Err))
 }
 
 func TestProofAdmissionUsesRootPublishedWhileWaiting(t *testing.T) {

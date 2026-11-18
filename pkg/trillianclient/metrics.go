@@ -69,6 +69,7 @@ var (
 type cachedClientMetrics struct {
 	pollSuccess       prometheus.Counter
 	pollFailure       prometheus.Counter
+	pollRegressed     prometheus.Counter
 	rootSize          prometheus.Gauge
 	pending           prometheus.Gauge
 	rejected          prometheus.Counter
@@ -85,6 +86,7 @@ func newCachedClientMetrics(treeID int64) cachedClientMetrics {
 	return cachedClientMetrics{
 		pollSuccess:       rootPolls.WithLabelValues(label, "success"),
 		pollFailure:       rootPolls.WithLabelValues(label, "failure"),
+		pollRegressed:     rootPolls.WithLabelValues(label, "regressed"),
 		rootSize:          rootSize.WithLabelValues(label),
 		pending:           writesPending.WithLabelValues(label),
 		rejected:          writesRejected.WithLabelValues(label),

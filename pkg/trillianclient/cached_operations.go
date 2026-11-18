@@ -89,6 +89,56 @@ func (t *cachedTrillianClient) acquireProof(ctx context.Context) error {
 	}
 }
 
+// acquireWriteProof waits for proof concurrency on behalf of a write that
+// already holds a pending-write slot and has submitted its leaf. Committed
+// writes bypass the read proofWaiters cap so a synchronized batch wakeup from
+// waitForSize cannot fail already-queued leaves with post-commit 503s; they
+// remain bounded by maxPending, caller deadlines, shutdown, and root freshness.
+func (t *cachedTrillianClient) acquireWriteProof(ctx context.Context) error {
+	if err := t.contextError(ctx); err != nil {
+		return err
+	}
+	select {
+	case t.proofs <- struct{}{}:
+		t.metrics.proofs.Inc()
+		return nil
+	default:
+	}
+	started := time.Now()
+	t.metrics.proofWaiters.Inc()
+	defer func() {
+		t.metrics.proofWaiters.Dec()
+		t.metrics.proofWaitDuration.Observe(time.Since(started).Seconds())
+	}()
+	remaining := func() time.Duration {
+		return t.opts.maxRootAge - time.Duration(cacheClockNow()-t.lastSuccess.Load())
+	}
+	var staleCh <-chan time.Time
+	var timer *time.Timer
+	if !t.opts.frozen {
+		timer = time.NewTimer(remaining())
+		defer timer.Stop()
+		staleCh = timer.C
+	}
+	for {
+		select {
+		case t.proofs <- struct{}{}:
+			t.metrics.proofs.Inc()
+			return nil
+		case <-staleCh:
+			if left := remaining(); left > 0 {
+				timer.Reset(left)
+				continue
+			}
+			return status.Error(codes.Unavailable, "cached signed log root is stale")
+		case <-ctx.Done():
+			return status.FromContextError(ctx.Err()).Err()
+		case <-t.stopped.Done():
+			return t.contextError(ctx)
+		}
+	}
+}
+
 func (t *cachedTrillianClient) releaseProof() {
 	<-t.proofs
 	t.metrics.proofs.Dec()
@@ -214,8 +264,8 @@ func (t *cachedTrillianClient) AddLeaf(ctx context.Context, value []byte) *inter
 	if err != nil {
 		return &internalclient.Response{Status: status.Code(err), Err: err, GetAddResult: queued}
 	}
-	if queued == nil || queued.QueuedLeaf == nil || queued.QueuedLeaf.Leaf == nil {
-		return &internalclient.Response{Status: codes.Internal, Err: fmt.Errorf("trillian returned no queued leaf")}
+	if queued == nil || queued.QueuedLeaf == nil {
+		return responseError(status.Error(codes.Internal, "trillian returned no queued leaf"))
 	}
 	if s := queued.QueuedLeaf.Status; s != nil && s.Code != int32(codes.OK) {
 		return &internalclient.Response{Status: codes.OK, GetAddResult: queued}
@@ -233,7 +283,7 @@ func (t *cachedTrillianClient) AddLeaf(ctx context.Context, value []byte) *inter
 		if err != nil {
 			return &internalclient.Response{Status: status.Code(err), Err: err, GetAddResult: queued}
 		}
-		leaf, used := t.leafAndProofForHash(ctx, hash, snap)
+		leaf, used := t.leafAndProofForHashWith(ctx, hash, snap, t.acquireWriteProof)
 		if leaf.Err == nil {
 			queued.QueuedLeaf.Leaf = leaf.GetLeafAndProofResult.Leaf
 			leaf.GetAddResult = queued
@@ -269,7 +319,11 @@ func (t *cachedTrillianClient) leafForHash(ctx context.Context, hash []byte, pro
 // leafAndProofForHash bounds the complete proof read, including the dependent
 // leaf lookup, so slow Trillian responses cannot create unbounded RPC fan-out.
 func (t *cachedTrillianClient) leafAndProofForHash(ctx context.Context, hash []byte, snap rootSnapshot) (*internalclient.Response, rootSnapshot) {
-	if err := t.acquireProof(ctx); err != nil {
+	return t.leafAndProofForHashWith(ctx, hash, snap, t.acquireProof)
+}
+
+func (t *cachedTrillianClient) leafAndProofForHashWith(ctx context.Context, hash []byte, snap rootSnapshot, acquire func(context.Context) error) (*internalclient.Response, rootSnapshot) {
+	if err := acquire(ctx); err != nil {
 		return responseError(err), snap
 	}
 	defer t.releaseProof()

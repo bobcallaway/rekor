@@ -242,6 +242,11 @@ func (t *cachedTrillianClient) publish(next rootSnapshot) (bool, error) {
 		switch {
 		case next.root.TreeSize < old.root.TreeSize:
 			t.mu.Unlock()
+			var treeID int64
+			if t.directTrillianClient != nil {
+				treeID = t.logID
+			}
+			log.Logger.Warnw("ignoring regressed Trillian root", "treeID", treeID, "cachedSize", old.root.TreeSize, "receivedSize", next.root.TreeSize)
 			return false, nil
 		case next.root.TreeSize == old.root.TreeSize:
 			if !bytes.Equal(next.root.RootHash, old.root.RootHash) {
@@ -291,7 +296,11 @@ func (t *cachedTrillianClient) update() {
 		started := time.Now()
 		err := t.poll()
 		if err != nil && t.stopped.Err() == nil {
-			log.Logger.Debugw("failed to update cached Trillian root", "treeID", t.logID, "err", err)
+			if status.Code(err) == codes.DataLoss {
+				log.Logger.Errorw("failed to update cached Trillian root", "treeID", t.logID, "err", err)
+			} else {
+				log.Logger.Warnw("failed to update cached Trillian root", "treeID", t.logID, "err", err)
+			}
 		}
 		if err == nil && t.opts.frozen {
 			return
@@ -326,13 +335,20 @@ func (t *cachedTrillianClient) poll() error {
 	if t.stopped.Err() != nil {
 		err = errClientClosed
 	}
+	regressed := false
 	if err == nil {
+		if old := t.snapshot.Load(); old != nil && snap.root.TreeSize < old.root.TreeSize {
+			regressed = true
+		}
 		_, err = t.publish(snap)
 	}
-	if err == nil {
-		t.metrics.pollSuccess.Inc()
-	} else {
+	switch {
+	case err != nil:
 		t.metrics.pollFailure.Inc()
+	case regressed:
+		t.metrics.pollRegressed.Inc()
+	default:
+		t.metrics.pollSuccess.Inc()
 	}
 
 	t.mu.Lock()

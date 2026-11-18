@@ -29,6 +29,7 @@ import (
 	"github.com/google/trillian"
 	"github.com/google/trillian/testonly"
 	"github.com/google/trillian/types"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	internalclient "github.com/sigstore/rekor/internal/trillianclient"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -165,6 +166,37 @@ func TestCachedClientDoesNotRefreshOnOlderRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, published)
 	require.EqualValues(t, 123, tc.lastSuccess.Load())
+	require.EqualValues(t, 2, tc.snapshot.Load().root.TreeSize)
+}
+
+func TestCachedClientPollRecordsRegressedRoot(t *testing.T) {
+	tree := newLogTree(t, 2)
+	var polls atomic.Int32
+	backend := &controlledLogClient{
+		latest: func(_ context.Context, _ *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
+			if polls.Add(1) == 1 {
+				return tree.response(0, 2), nil
+			}
+			return tree.response(0, 1), nil
+		},
+	}
+	tc := newManuallyPolledClient(backend, cacheOptions{})
+	defer tc.Close()
+
+	successBefore := testutil.ToFloat64(tc.metrics.pollSuccess)
+	failureBefore := testutil.ToFloat64(tc.metrics.pollFailure)
+	regressedBefore := testutil.ToFloat64(tc.metrics.pollRegressed)
+
+	require.NoError(t, tc.poll())
+	lastSuccess := tc.lastSuccess.Load()
+	require.Equal(t, successBefore+1, testutil.ToFloat64(tc.metrics.pollSuccess))
+	require.Equal(t, regressedBefore, testutil.ToFloat64(tc.metrics.pollRegressed))
+
+	require.NoError(t, tc.poll())
+	require.Equal(t, successBefore+1, testutil.ToFloat64(tc.metrics.pollSuccess))
+	require.Equal(t, failureBefore, testutil.ToFloat64(tc.metrics.pollFailure))
+	require.Equal(t, regressedBefore+1, testutil.ToFloat64(tc.metrics.pollRegressed))
+	require.Equal(t, lastSuccess, tc.lastSuccess.Load())
 	require.EqualValues(t, 2, tc.snapshot.Load().root.TreeSize)
 }
 

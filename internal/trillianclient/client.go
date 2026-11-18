@@ -28,8 +28,8 @@ import (
 // Backend ResourceExhausted errors must not be treated as this rejection.
 var ErrPendingWritesFull = &pendingWritesFullError{}
 
-// ErrProofQueueFull identifies local proof admission rejection. For writes,
-// this can occur after the leaf has already been submitted to Trillian.
+// ErrProofQueueFull identifies local read proof admission rejection when the
+// proof concurrency limit and read waiter queue are both full.
 var ErrProofQueueFull = &proofQueueFullError{}
 
 type proofQueueFullError struct{}

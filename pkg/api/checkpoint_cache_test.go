@@ -38,6 +38,7 @@ type countingSigner struct {
 	release  chan struct{}
 	contexts chan context.Context
 	signErr  error
+	panicVal any
 	once     sync.Once
 }
 
@@ -59,6 +60,9 @@ func (s *countingSigner) SignMessage(message io.Reader, opts ...signature.SignOp
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	}
+	if s.panicVal != nil {
+		panic(s.panicVal)
 	}
 	if s.signErr != nil {
 		return nil, s.signErr
@@ -320,5 +324,45 @@ func TestCheckpointCacheBoundsDistinctSigning(t *testing.T) {
 		require.NoError(t, err)
 		require.Zero(t, cache.inFlight)
 		require.Len(t, cache.entries, 1)
+	})
+}
+
+func TestCheckpointCacheRecoversFromSignerPanic(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		panicking := newCountingSigner(t)
+		panicking.entered = make(chan struct{})
+		panicking.release = make(chan struct{})
+		panicking.panicVal = "signer exploded"
+		cache := newCheckpointCache(4, time.Second, 1)
+		defer cache.close()
+		root := sha256.Sum256([]byte("root"))
+
+		const callers = 4
+		errs := make(chan error, callers)
+		for range callers {
+			go func() {
+				_, err := cache.sign(context.Background(), "rekor.example", 42, 7, root[:], panicking)
+				errs <- err
+			}()
+		}
+		<-panicking.entered
+		synctest.Wait()
+		close(panicking.release)
+
+		for range callers {
+			err := <-errs
+			require.ErrorContains(t, err, "checkpoint signing panicked: signer exploded")
+		}
+		require.Zero(t, cache.inFlight)
+		require.Empty(t, cache.entries)
+
+		// Capacity and cache slot must be fully restored for subsequent signing.
+		healthy := newCountingSigner(t)
+		cp, err := cache.sign(context.Background(), "rekor.example", 42, 7, root[:], healthy)
+		require.NoError(t, err)
+		require.NotEmpty(t, cp)
+		require.Zero(t, cache.inFlight)
+		require.Len(t, cache.entries, 1)
+		require.EqualValues(t, 1, healthy.calls.Load())
 	})
 }

@@ -79,7 +79,7 @@ func (t *directTrillianClient) AddLeaf(ctx context.Context, byteValue []byte) *i
 		}
 	}
 
-	if resp == nil || resp.QueuedLeaf == nil || resp.QueuedLeaf.Leaf == nil {
+	if resp == nil || resp.QueuedLeaf == nil {
 		return responseError(status.Error(codes.Internal, "trillian returned no queued leaf"))
 	}
 	if s := resp.QueuedLeaf.Status; s != nil && s.Code != int32(codes.OK) {

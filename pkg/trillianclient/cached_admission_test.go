@@ -161,7 +161,7 @@ func TestCachedPollWaitCancellation(t *testing.T) {
 	}
 }
 
-func TestCachedProofQueueBoundsReadsAndWrites(t *testing.T) {
+func TestCachedProofQueueBoundsReadsAndDecouplesWrites(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		tree := newLogTree(t, 2)
 		size := uint64(1)
@@ -169,7 +169,6 @@ func TestCachedProofQueueBoundsReadsAndWrites(t *testing.T) {
 		backend.latest = func(_ context.Context, req *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
 			return tree.response(uint64(req.FirstTreeSize), size), nil //nolint:gosec // Small test tree.
 		}
-		// No proof RPCs are configured: overflow must be rejected locally.
 		tc := newManuallyPolledClient(backend, cacheOptions{proofConcurrency: 1, maxProofWaiters: 1})
 		defer tc.Close()
 		require.NoError(t, tc.poll())
@@ -177,6 +176,12 @@ func TestCachedProofQueueBoundsReadsAndWrites(t *testing.T) {
 			size = 2
 			require.NoError(t, tc.poll())
 			return &trillian.QueueLeafResponse{QueuedLeaf: &trillian.QueuedLogLeaf{Leaf: testIntegratedLeaf(tree, 1)}}, nil
+		}
+		backend.inclusion = func(_ context.Context, req *trillian.GetInclusionProofByHashRequest) (*trillian.GetInclusionProofByHashResponse, error) {
+			return &trillian.GetInclusionProofByHashResponse{Proof: []*trillian.Proof{{LeafIndex: 1, Hashes: tree.inclusion(1, uint64(req.TreeSize))}}}, nil //nolint:gosec
+		}
+		backend.leaves = func(context.Context, *trillian.GetLeavesByRangeRequest) (*trillian.GetLeavesByRangeResponse, error) {
+			return &trillian.GetLeavesByRangeResponse{Leaves: []*trillian.LogLeaf{testIntegratedLeaf(tree, 1)}}, nil
 		}
 		rejectedBefore := testutil.ToFloat64(tc.metrics.proofsRejected)
 		histogram := tc.metrics.proofWaitDuration.(prometheus.Histogram)
@@ -197,24 +202,40 @@ func TestCachedProofQueueBoundsReadsAndWrites(t *testing.T) {
 			require.Equal(t, codes.ResourceExhausted, result.Status)
 			require.ErrorIs(t, result.Err, internalclient.ErrProofQueueFull)
 		}
-		write := tc.AddLeaf(context.Background(), []byte("leaf-1"))
-		require.Equal(t, codes.ResourceExhausted, write.Status)
-		require.ErrorIs(t, write.Err, internalclient.ErrProofQueueFull)
-		require.NotNil(t, write.GetAddResult) // Submission already happened.
-		require.Empty(t, tc.pending)
-		require.Equal(t, rejectedBefore+3, testutil.ToFloat64(tc.metrics.proofsRejected))
+		require.Equal(t, rejectedBefore+2, testutil.ToFloat64(tc.metrics.proofsRejected))
+
+		// An already-submitted write bypasses the read waiter cap and waits for
+		// proof concurrency rather than failing post-commit with ErrProofQueueFull.
+		writeDone := make(chan *internalclient.Response, 1)
+		go func() { writeDone <- tc.AddLeaf(context.Background(), []byte("leaf-1")) }()
+		synctest.Wait()
+		require.Len(t, tc.pending, 1)
+		require.Len(t, tc.proofWaiters, 1) // Read waiter channel is unaffected.
+		require.EqualValues(t, 2, testutil.ToFloat64(tc.metrics.proofWaiters))
+		require.Equal(t, rejectedBefore+2, testutil.ToFloat64(tc.metrics.proofsRejected))
+
 		time.Sleep(100 * time.Millisecond)
 		cancel()
 		require.Equal(t, codes.Canceled, status.Code(<-done))
 		require.Empty(t, tc.proofWaiters)
-		require.Zero(t, testutil.ToFloat64(tc.metrics.proofWaiters))
+		require.EqualValues(t, 1, testutil.ToFloat64(tc.metrics.proofWaiters))
 		after := &dto.Metric{}
 		require.NoError(t, histogram.Write(after))
 		require.Equal(t, before.GetHistogram().GetSampleCount()+1, after.GetHistogram().GetSampleCount())
 		require.InDelta(t, .1, after.GetHistogram().GetSampleSum()-before.GetHistogram().GetSampleSum(), .000001)
 
-		// Canceled waiters return queue capacity; releasing a running operation
-		// then admits the replacement without exceeding the active limit.
+		// Releasing proof capacity lets the queued write complete with a verified proof.
+		tc.releaseProof()
+		write := <-writeDone
+		requireVerifiedRead(t, write, tree, 1, 2)
+		require.NotNil(t, write.GetAddResult)
+		require.Empty(t, tc.pending)
+		require.Zero(t, testutil.ToFloat64(tc.metrics.proofs))
+		require.Zero(t, testutil.ToFloat64(tc.metrics.proofWaiters))
+
+		// Canceled read waiters return queue capacity; releasing a running
+		// operation then admits the replacement without exceeding the active limit.
+		require.NoError(t, tc.acquireProof(context.Background()))
 		go func() { done <- tc.acquireProof(context.Background()) }()
 		synctest.Wait()
 		require.Len(t, tc.proofWaiters, 1)
@@ -226,6 +247,153 @@ func TestCachedProofQueueBoundsReadsAndWrites(t *testing.T) {
 		require.Zero(t, testutil.ToFloat64(tc.metrics.proofs))
 		require.Zero(t, testutil.ToFloat64(tc.metrics.proofWaiters))
 	})
+}
+
+func TestCachedWriteBurstDrainsWithoutPostCommitOverload(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			burst            = 12
+			proofConcurrency = 2
+			maxProofWaiters  = 1
+		)
+		tree := newLogTree(t, burst)
+		size := uint64(0)
+		var activeProofs, maxActiveProofs atomic.Int32
+		byHash := make(map[string]*trillian.LogLeaf, burst)
+		for i := range burst {
+			leaf := testIntegratedLeaf(tree, uint64(i))
+			byHash[string(leaf.MerkleLeafHash)] = leaf
+		}
+
+		backend := &controlledLogClient{}
+		backend.latest = func(_ context.Context, req *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
+			return tree.response(uint64(req.FirstTreeSize), size), nil //nolint:gosec
+		}
+		backend.queue = func(_ context.Context, req *trillian.QueueLeafRequest) (*trillian.QueueLeafResponse, error) {
+			for _, leaf := range byHash {
+				if string(leaf.LeafValue) == string(req.Leaf.LeafValue) {
+					return &trillian.QueueLeafResponse{QueuedLeaf: &trillian.QueuedLogLeaf{Leaf: leaf}}, nil
+				}
+			}
+			return nil, status.Error(codes.Internal, "unexpected leaf")
+		}
+		backend.inclusion = func(_ context.Context, req *trillian.GetInclusionProofByHashRequest) (*trillian.GetInclusionProofByHashResponse, error) {
+			cur := activeProofs.Add(1)
+			defer activeProofs.Add(-1)
+			for {
+				prev := maxActiveProofs.Load()
+				if cur <= prev || maxActiveProofs.CompareAndSwap(prev, cur) {
+					break
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+			leaf := byHash[string(req.LeafHash)]
+			return &trillian.GetInclusionProofByHashResponse{
+				Proof: []*trillian.Proof{{LeafIndex: leaf.LeafIndex, Hashes: tree.inclusion(uint64(leaf.LeafIndex), uint64(req.TreeSize))}}, //nolint:gosec
+			}, nil
+		}
+		backend.leaves = func(_ context.Context, req *trillian.GetLeavesByRangeRequest) (*trillian.GetLeavesByRangeResponse, error) {
+			return &trillian.GetLeavesByRangeResponse{Leaves: []*trillian.LogLeaf{testIntegratedLeaf(tree, uint64(req.StartIndex))}}, nil //nolint:gosec
+		}
+
+		tc := newManuallyPolledClient(backend, cacheOptions{
+			maxPending:       burst,
+			proofConcurrency: proofConcurrency,
+			maxProofWaiters:  maxProofWaiters,
+		})
+		defer tc.Close()
+		require.NoError(t, tc.poll())
+		rejectedBefore := testutil.ToFloat64(tc.metrics.proofsRejected)
+
+		results := make(chan *internalclient.Response, burst)
+		for i := range burst {
+			leaf := testIntegratedLeaf(tree, uint64(i))
+			go func() { results <- tc.AddLeaf(context.Background(), leaf.LeafValue) }()
+		}
+		synctest.Wait()
+		require.Len(t, tc.pending, burst)
+		require.Equal(t, burst, tc.waiters.waiterCount())
+
+		// One root advance wakes all 12 writers simultaneously, far exceeding
+		// proofConcurrency + maxProofWaiters (3). Every write must succeed
+		// while backend proof concurrency stays bounded at 2.
+		size = burst
+		require.NoError(t, tc.poll())
+		for range burst {
+			resp := <-results
+			require.Equal(t, codes.OK, resp.Status)
+			require.NoError(t, resp.Err)
+			require.NotNil(t, resp.GetAddResult)
+			require.NotNil(t, resp.GetLeafAndProofResult)
+		}
+		require.EqualValues(t, proofConcurrency, maxActiveProofs.Load())
+		require.Equal(t, rejectedBefore, testutil.ToFloat64(tc.metrics.proofsRejected))
+		require.Empty(t, tc.pending)
+		require.Empty(t, tc.proofs)
+		require.Empty(t, tc.proofWaiters)
+		require.Zero(t, testutil.ToFloat64(tc.metrics.proofWaiters))
+	})
+}
+
+func TestCachedWriteProofWaitStops(t *testing.T) {
+	for _, reason := range []string{"cancel", "deadline", "close", "stale"} {
+		t.Run(reason, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tc := newManuallyPolledClient(nil, cacheOptions{
+					proofConcurrency: 1,
+					maxProofWaiters:  1,
+					maxRootAge:       time.Second,
+				})
+				defer tc.Close()
+				tc.lastSuccess.Store(cacheClockNow())
+				require.NoError(t, tc.acquireProof(context.Background()))
+				defer tc.releaseProof()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- tc.acquireWriteProof(ctx) }()
+				synctest.Wait()
+				require.Empty(t, tc.proofWaiters)
+				require.EqualValues(t, 1, testutil.ToFloat64(tc.metrics.proofWaiters))
+
+				want := codes.Unavailable
+				switch reason {
+				case "cancel":
+					cancel()
+					want = codes.Canceled
+				case "deadline":
+					// Keep the root fresh past the caller deadline so deadline wins.
+					time.Sleep(750 * time.Millisecond)
+					tc.lastSuccess.Store(cacheClockNow())
+					time.Sleep(750 * time.Millisecond)
+					tc.lastSuccess.Store(cacheClockNow())
+					time.Sleep(500 * time.Millisecond)
+					want = codes.DeadlineExceeded
+				case "close":
+					tc.Close()
+				case "stale":
+					// Freshness extension delays expiry; staleness expires once it stops.
+					time.Sleep(750 * time.Millisecond)
+					tc.lastSuccess.Store(cacheClockNow())
+					time.Sleep(500 * time.Millisecond)
+					synctest.Wait()
+					select {
+					case err := <-done:
+						t.Fatalf("expired despite freshness extension: %v", err)
+					default:
+					}
+					time.Sleep(501 * time.Millisecond)
+				}
+				err := <-done
+				require.Equal(t, want, status.Code(err))
+				if reason == "stale" {
+					require.ErrorContains(t, err, "stale")
+				}
+				require.Zero(t, testutil.ToFloat64(tc.metrics.proofWaiters))
+			})
+		})
+	}
 }
 
 func TestCachedProofQueueDeadlineAndShutdown(t *testing.T) {
