@@ -42,7 +42,9 @@ import (
 	"github.com/transparency-dev/merkle/rfc6962"
 	"google.golang.org/genproto/googleapis/rpc/code"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	internalclient "github.com/sigstore/rekor/internal/trillianclient"
 	"github.com/sigstore/rekor/pkg/events"
 	"github.com/sigstore/rekor/pkg/events/newentry"
 	"github.com/sigstore/rekor/pkg/generated/models"
@@ -552,12 +554,48 @@ func SearchLogQueryHandler(params entries.SearchLogQueryParams) middleware.Respo
 		return handleRekorAPIError(params, http.StatusUnprocessableEntity, fmt.Errorf(maxSearchQueryLimit, maxSearchQueries), fmt.Sprintf(maxSearchQueryLimit, maxSearchQueries))
 	}
 
+	type activeEntryIDMiss struct {
+		entryID     string
+		uuid        string
+		checkedSize uint64
+	}
+	type activeHashMiss struct {
+		hash        []byte
+		checkedSize uint64
+	}
+	type activeIndexMiss struct {
+		logIndex    int
+		checkedSize uint64
+	}
+
+	activeID := api.logRanges.GetActive().TreeID
+	var (
+		activeFastClient internalclient.FastReadClient
+		entryIDMisses    []activeEntryIDMiss
+		hashMisses       []activeHashMiss
+		indexMisses      []activeIndexMiss
+	)
+
 	if len(params.Entry.EntryUUIDs) > 0 || len(params.Entry.Entries()) > 0 {
 		var searchHashes [][]byte
 		for _, entryID := range params.Entry.EntryUUIDs {
 			// if we got this far, then entryID is either a 64 or 80 character hex string
 			err := sharding.ValidateEntryID(entryID)
 			if err == nil {
+				tid, tidErr := sharding.TreeID(entryID)
+				uuid, uuidErr := sharding.GetUUIDFromIDString(entryID)
+				if tidErr == nil && uuidErr == nil && tid == activeID {
+					logEntry, checkedSize, fc, err := retrieveUUIDFromTreeFast(httpReqCtx, uuid, tid)
+					if err == nil {
+						resultPayload = append(resultPayload, logEntry)
+					} else if errors.Is(err, ErrNotFound) && fc != nil {
+						activeFastClient = fc
+						entryIDMisses = append(entryIDMisses, activeEntryIDMiss{entryID: entryID, uuid: uuid, checkedSize: checkedSize})
+					} else if !errors.Is(err, ErrNotFound) {
+						return handleRekorAPIError(params, http.StatusInternalServerError, err, fmt.Sprintf("error getting log entry for %s", entryID))
+					}
+					continue
+				}
 				logEntry, err := retrieveLogEntry(httpReqCtx, entryID)
 				if err != nil && !errors.Is(err, ErrNotFound) {
 					return handleRekorAPIError(params, http.StatusInternalServerError, err, fmt.Sprintf("error getting log entry for %s", entryID))
@@ -605,7 +643,18 @@ func SearchLogQueryHandler(params entries.SearchLogQueryParams) middleware.Respo
 				if err != nil {
 					return handleRekorAPIError(params, http.StatusInternalServerError, err, trillianCommunicationError)
 				}
-				resp := tc.GetLeafAndProofByHash(httpReqCtx, hash)
+				var resp *internalclient.Response
+				var checkedSize uint64
+				var fc internalclient.FastReadClient
+				if shard == activeID {
+					if fast, ok := tc.(internalclient.FastReadClient); ok {
+						fc = fast
+						resp, checkedSize = fast.GetLeafAndProofByHashFast(httpReqCtx, hash)
+					}
+				}
+				if resp == nil {
+					resp = tc.GetLeafAndProofByHash(httpReqCtx, hash)
+				}
 				switch resp.Status {
 				case codes.OK:
 					leafResult := resp.GetLeafAndProofResult
@@ -616,7 +665,10 @@ func SearchLogQueryHandler(params entries.SearchLogQueryParams) middleware.Respo
 						results[shard] = resp.GetLeafAndProofResult
 					}
 				case codes.NotFound:
-					// do nothing here, do not throw 404 error
+					if fc != nil {
+						activeFastClient = fc
+						hashMisses = append(hashMisses, activeHashMiss{hash: hash, checkedSize: checkedSize})
+					}
 					continue
 				default:
 					return handleRekorAPIError(params, http.StatusInternalServerError, fmt.Errorf("error getLeafAndProofByHash(%s): code: %v, msg %w", hex.EncodeToString(hash), resp.Status, resp.Err), trillianCommunicationError)
@@ -641,7 +693,76 @@ func SearchLogQueryHandler(params entries.SearchLogQueryParams) middleware.Respo
 
 	if len(params.Entry.LogIndexes) > 0 {
 		for _, logIndex := range params.Entry.LogIndexes {
-			logEntry, err := retrieveLogEntryByIndex(httpReqCtx, int(conv.Value(logIndex)))
+			idx := int(conv.Value(logIndex))
+			tid, resolvedIndex := api.logRanges.ResolveVirtualIndex(idx)
+			if tid == activeID {
+				logEntry, checkedSize, fc, err := retrieveLogEntryByIndexFast(httpReqCtx, tid, resolvedIndex)
+				if err == nil {
+					resultPayload = append(resultPayload, logEntry)
+				} else if errors.Is(err, ErrNotFound) && fc != nil && resolvedIndex >= 0 && uint64(resolvedIndex) >= checkedSize {
+					activeFastClient = fc
+					indexMisses = append(indexMisses, activeIndexMiss{logIndex: idx, checkedSize: checkedSize})
+				} else if !errors.Is(err, ErrNotFound) {
+					return handleRekorAPIError(params, http.StatusInternalServerError, err, trillianCommunicationError)
+				}
+				continue
+			}
+			logEntry, err := retrieveLogEntryByIndex(httpReqCtx, idx)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return handleRekorAPIError(params, http.StatusInternalServerError, err, trillianCommunicationError)
+			} else if err == nil {
+				resultPayload = append(resultPayload, logEntry)
+			}
+		}
+	}
+
+	// Coalesce at most one active-shard root refresh across all misses in this batch.
+	if activeFastClient != nil && (len(entryIDMisses) > 0 || len(hashMisses) > 0 || len(indexMisses) > 0) {
+		refreshedSize, err := activeFastClient.WaitForRefresh(httpReqCtx)
+		if err != nil {
+			return handleRekorAPIError(params, http.StatusInternalServerError, err, trillianCommunicationError)
+		}
+		for _, miss := range entryIDMisses {
+			if refreshedSize <= miss.checkedSize {
+				continue
+			}
+			logEntry, _, _, err := retrieveUUIDFromTreeFast(httpReqCtx, miss.uuid, activeID)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return handleRekorAPIError(params, http.StatusInternalServerError, err, fmt.Sprintf("error getting log entry for %s", miss.entryID))
+			} else if err == nil {
+				resultPayload = append(resultPayload, logEntry)
+			}
+		}
+		for _, miss := range hashMisses {
+			if refreshedSize <= miss.checkedSize {
+				continue
+			}
+			resp, _ := activeFastClient.GetLeafAndProofByHashFast(httpReqCtx, miss.hash)
+			switch resp.Status {
+			case codes.OK:
+				leafResult := resp.GetLeafAndProofResult
+				if leafResult != nil && leafResult.Leaf != nil {
+					logEntry, err := logEntryFromLeaf(httpReqCtx, leafResult.Leaf, leafResult.SignedLogRoot, leafResult.Proof, activeID, api.logRanges, api.cachedCheckpoints, api.checkpointCache, api.checkpointHostname)
+					if err != nil {
+						return handleRekorAPIError(params, http.StatusInternalServerError, err, trillianUnexpectedResult)
+					}
+					resultPayload = append(resultPayload, logEntry)
+				}
+			case codes.NotFound:
+				continue
+			default:
+				return handleRekorAPIError(params, http.StatusInternalServerError, fmt.Errorf("error getLeafAndProofByHash(%s): code: %v, msg %w", hex.EncodeToString(miss.hash), resp.Status, resp.Err), trillianCommunicationError)
+			}
+		}
+		for _, miss := range indexMisses {
+			if refreshedSize <= miss.checkedSize {
+				continue
+			}
+			tid, resolvedIndex := api.logRanges.ResolveVirtualIndex(miss.logIndex)
+			if resolvedIndex < 0 || uint64(resolvedIndex) >= refreshedSize {
+				continue
+			}
+			logEntry, _, _, err := retrieveLogEntryByIndexFast(httpReqCtx, tid, resolvedIndex)
 			if err != nil && !errors.Is(err, ErrNotFound) {
 				return handleRekorAPIError(params, http.StatusInternalServerError, err, trillianCommunicationError)
 			} else if err == nil {
@@ -663,7 +784,26 @@ func retrieveLogEntryByIndex(ctx context.Context, logIndex int) (models.LogEntry
 	}
 	log.ContextLogger(ctx).Debugf("Retrieving resolved index %v from TreeID %v", resolvedIndex, tid)
 
-	resp := tc.GetLeafAndProofByIndex(ctx, resolvedIndex)
+	return retrieveLogEntryByIndexResponse(ctx, tid, tc.GetLeafAndProofByIndex(ctx, resolvedIndex))
+}
+
+func retrieveLogEntryByIndexFast(ctx context.Context, tid, resolvedIndex int64) (models.LogEntry, uint64, internalclient.FastReadClient, error) {
+	tc, err := api.trillianClientManager.GetClient(tid)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("getting log client for tree %d: %w", tid, err)
+	}
+	log.ContextLogger(ctx).Debugf("Retrieving resolved index %v from TreeID %v", resolvedIndex, tid)
+
+	if fc, ok := tc.(internalclient.FastReadClient); ok {
+		resp, checkedSize := fc.GetLeafAndProofByIndexFast(ctx, resolvedIndex)
+		entry, err := retrieveLogEntryByIndexResponse(ctx, tid, resp)
+		return entry, checkedSize, fc, err
+	}
+	entry, err := retrieveLogEntryByIndexResponse(ctx, tid, tc.GetLeafAndProofByIndex(ctx, resolvedIndex))
+	return entry, 0, nil, err
+}
+
+func retrieveLogEntryByIndexResponse(ctx context.Context, tid int64, resp *internalclient.Response) (models.LogEntry, error) {
 	switch resp.Status {
 	case codes.OK:
 	case codes.NotFound, codes.OutOfRange, codes.InvalidArgument:
@@ -700,10 +840,24 @@ func retrieveLogEntry(ctx context.Context, entryUUID string) (models.LogEntry, e
 
 	// If we got a UUID instead of an EntryID, search all shards
 	if errors.Is(err, sharding.ErrPlainUUID) {
-		trees := []sharding.LogRange{api.logRanges.GetActive()}
-		trees = append(trees, api.logRanges.GetInactive()...)
+		activeID := api.logRanges.GetActive().TreeID
+		inactive := api.logRanges.GetInactive()
+		if len(inactive) == 0 {
+			return retrieveUUIDFromTree(ctx, uuid, activeID)
+		}
 
-		for _, t := range trees {
+		// Probe the active shard against its cached root first, then check
+		// frozen inactive shards without stalling, and only wait for an active
+		// root refresh if the UUID was not found anywhere.
+		logEntry, checkedSize, fastClient, err := retrieveUUIDFromTreeFast(ctx, uuid, activeID)
+		if err == nil {
+			return logEntry, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+
+		for _, t := range inactive {
 			logEntry, err := retrieveUUIDFromTree(ctx, uuid, t.TreeID)
 			if err != nil {
 				if errors.Is(err, ErrNotFound) {
@@ -712,6 +866,23 @@ func retrieveLogEntry(ctx context.Context, entryUUID string) (models.LogEntry, e
 				return nil, err
 			}
 			return logEntry, nil
+		}
+
+		if fastClient != nil {
+			refreshedSize, err := fastClient.WaitForRefresh(ctx)
+			if err != nil {
+				return retrieveUUIDResponse(ctx, uuid, activeID, &internalclient.Response{
+					Status: status.Code(err),
+					Err:    err,
+				})
+			}
+			if refreshedSize > checkedSize {
+				logEntry, _, _, err := retrieveUUIDFromTreeFast(ctx, uuid, activeID)
+				if err != nil {
+					return nil, err
+				}
+				return logEntry, nil
+			}
 		}
 		return nil, ErrNotFound
 	}
@@ -739,7 +910,37 @@ func retrieveUUIDFromTree(ctx context.Context, uuid string, tid int64) (models.L
 	}
 	log.ContextLogger(ctx).Debugf("Attempting to retrieve UUID %v from TreeID %v", uuid, tid)
 
-	resp := tc.GetLeafAndProofByHash(ctx, hashValue)
+	return retrieveUUIDResponse(ctx, uuid, tid, tc.GetLeafAndProofByHash(ctx, hashValue))
+}
+
+func retrieveUUIDFromTreeFast(ctx context.Context, uuid string, tid int64) (models.LogEntry, uint64, internalclient.FastReadClient, error) {
+	log.ContextLogger(ctx).Debugf("Retrieving log entry %v from tree %d", uuid, tid)
+
+	if _, err := api.logRanges.GetLogRangeByTreeID(tid); err != nil {
+		return models.LogEntry{}, 0, nil, ErrNotFound
+	}
+
+	hashValue, err := hex.DecodeString(uuid)
+	if err != nil {
+		return models.LogEntry{}, 0, nil, &types.InputValidationError{Err: fmt.Errorf("parsing UUID: %w", err)}
+	}
+
+	tc, err := api.trillianClientManager.GetClient(tid)
+	if err != nil {
+		return models.LogEntry{}, 0, nil, fmt.Errorf("getting log client for tree %d: %w", tid, err)
+	}
+	log.ContextLogger(ctx).Debugf("Attempting to retrieve UUID %v from TreeID %v", uuid, tid)
+
+	if fc, ok := tc.(internalclient.FastReadClient); ok {
+		resp, checkedSize := fc.GetLeafAndProofByHashFast(ctx, hashValue)
+		entry, err := retrieveUUIDResponse(ctx, uuid, tid, resp)
+		return entry, checkedSize, fc, err
+	}
+	entry, err := retrieveUUIDResponse(ctx, uuid, tid, tc.GetLeafAndProofByHash(ctx, hashValue))
+	return entry, 0, nil, err
+}
+
+func retrieveUUIDResponse(ctx context.Context, uuid string, tid int64, resp *internalclient.Response) (models.LogEntry, error) {
 	switch resp.Status {
 	case codes.OK:
 		result := resp.GetLeafAndProofResult

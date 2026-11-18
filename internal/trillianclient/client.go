@@ -76,6 +76,16 @@ type Client interface {
 	Close()
 }
 
+// FastReadClient is an optional extension implemented by cached clients so
+// multi-shard and batch lookups can query the current cached snapshot without
+// blocking on a root poll, then coalesce at most one WaitForRefresh across all
+// active-shard misses.
+type FastReadClient interface {
+	GetLeafAndProofByHashFast(ctx context.Context, hash []byte) (*Response, uint64)
+	GetLeafAndProofByIndexFast(ctx context.Context, index int64) (*Response, uint64)
+	WaitForRefresh(ctx context.Context) (uint64, error)
+}
+
 // Response includes a status code, an optional error message, and one of the results based on the API call
 type Response struct {
 	// Status is the status code of the response

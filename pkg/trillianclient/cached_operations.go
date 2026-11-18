@@ -341,55 +341,75 @@ func (t *cachedTrillianClient) leafAndProofForHashWith(ctx context.Context, hash
 	return t.leafForHash(ctx, hash, proof), snap
 }
 
-func (t *cachedTrillianClient) GetLeafAndProofByHash(ctx context.Context, hash []byte) *internalclient.Response {
+func (t *cachedTrillianClient) GetLeafAndProofByHashFast(ctx context.Context, hash []byte) (*internalclient.Response, uint64) {
 	snap, err := t.current(ctx)
 	if err != nil {
-		return responseError(err)
+		return responseError(err), 0
 	}
-	result, snap := t.leafAndProofForHash(ctx, hash, snap)
+	result, used := t.leafAndProofForHash(ctx, hash, snap)
+	return result, used.root.TreeSize
+}
+
+func (t *cachedTrillianClient) WaitForRefresh(ctx context.Context) (uint64, error) {
+	if err := t.ensureRoot(ctx); err != nil {
+		return 0, err
+	}
+	if !t.opts.frozen {
+		if err := t.waitForPoll(ctx); err != nil {
+			return 0, err
+		}
+	}
+	snap, err := t.current(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return snap.root.TreeSize, nil
+}
+
+func (t *cachedTrillianClient) GetLeafAndProofByHash(ctx context.Context, hash []byte) *internalclient.Response {
+	result, checkedSize := t.GetLeafAndProofByHashFast(ctx, hash)
 	if result.Err != nil && !t.opts.frozen {
 		code := status.Code(result.Err)
 		if code == codes.NotFound || code == codes.OutOfRange {
-			if err := t.waitForPoll(ctx); err != nil {
-				return responseError(err)
-			}
-			next, err := t.current(ctx)
+			refreshedSize, err := t.WaitForRefresh(ctx)
 			if err != nil {
 				return responseError(err)
 			}
-			if next.root.TreeSize > snap.root.TreeSize {
-				result, _ = t.leafAndProofForHash(ctx, hash, next)
+			if refreshedSize > checkedSize {
+				result, _ = t.GetLeafAndProofByHashFast(ctx, hash)
 			}
 		}
 	}
 	return result
 }
 
-func (t *cachedTrillianClient) GetLeafAndProofByIndex(ctx context.Context, index int64) *internalclient.Response {
+func (t *cachedTrillianClient) GetLeafAndProofByIndexFast(ctx context.Context, index int64) (*internalclient.Response, uint64) {
 	if index < 0 {
-		return responseError(status.Errorf(codes.InvalidArgument, "negative leaf index %d", index))
+		return responseError(status.Errorf(codes.InvalidArgument, "negative leaf index %d", index)), 0
 	}
 	snap, err := t.current(ctx)
 	if err != nil {
-		return responseError(err)
+		return responseError(err), 0
 	}
 	if uint64(index) < snap.root.TreeSize {
+		return t.entryAndProof(ctx, index), snap.root.TreeSize
+	}
+	return responseError(status.Errorf(codes.NotFound, "leaf index %d is outside tree size %d", index, snap.root.TreeSize)), snap.root.TreeSize
+}
+
+func (t *cachedTrillianClient) GetLeafAndProofByIndex(ctx context.Context, index int64) *internalclient.Response {
+	result, checkedSize := t.GetLeafAndProofByIndexFast(ctx, index)
+	if result.Err != nil && !t.opts.frozen && index >= 0 && uint64(index) >= checkedSize && status.Code(result.Err) == codes.NotFound {
+		refreshedSize, err := t.WaitForRefresh(ctx)
+		if err != nil {
+			return responseError(err)
+		}
+		if uint64(index) >= refreshedSize {
+			return responseError(status.Errorf(codes.NotFound, "leaf index %d is outside tree size %d", index, refreshedSize))
+		}
 		return t.entryAndProof(ctx, index)
 	}
-	if t.opts.frozen {
-		return responseError(status.Errorf(codes.NotFound, "leaf index %d is outside tree size %d", index, snap.root.TreeSize))
-	}
-	if err := t.waitForPoll(ctx); err != nil {
-		return responseError(err)
-	}
-	snap, err = t.current(ctx)
-	if err != nil {
-		return responseError(err)
-	}
-	if uint64(index) >= snap.root.TreeSize {
-		return responseError(status.Errorf(codes.NotFound, "leaf index %d is outside tree size %d", index, snap.root.TreeSize))
-	}
-	return t.entryAndProof(ctx, index)
+	return result
 }
 
 func (t *cachedTrillianClient) entryAndProof(ctx context.Context, index int64) *internalclient.Response {

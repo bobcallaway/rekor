@@ -413,3 +413,75 @@ func TestCacheDefaultsSurviveOneTimedOutPoll(t *testing.T) {
 	slow := cacheOptions{pollInterval: time.Minute, maxRootAge: time.Second}.withDefaults()
 	require.Equal(t, time.Minute, slow.retryMax())
 }
+
+func TestCachedClientFastReadAndRefresh(t *testing.T) {
+	tree := newLogTree(t, 2)
+	size := uint64(1)
+	backend := &controlledLogClient{
+		latest: func(_ context.Context, req *trillian.GetLatestSignedLogRootRequest) (*trillian.GetLatestSignedLogRootResponse, error) {
+			return tree.response(uint64(req.FirstTreeSize), size), nil //nolint:gosec
+		},
+		inclusion: func(_ context.Context, req *trillian.GetInclusionProofByHashRequest) (*trillian.GetInclusionProofByHashResponse, error) {
+			for i := range uint64(req.TreeSize) { //nolint:gosec
+				if string(tree.leafHash(i)) == string(req.LeafHash) {
+					return &trillian.GetInclusionProofByHashResponse{
+						Proof: []*trillian.Proof{{LeafIndex: int64(i), Hashes: tree.inclusion(i, uint64(req.TreeSize))}}, //nolint:gosec
+					}, nil
+				}
+			}
+			return nil, status.Error(codes.NotFound, "missing")
+		},
+		leaves: func(_ context.Context, req *trillian.GetLeavesByRangeRequest) (*trillian.GetLeavesByRangeResponse, error) {
+			return &trillian.GetLeavesByRangeResponse{Leaves: []*trillian.LogLeaf{testIntegratedLeaf(tree, uint64(req.StartIndex))}}, nil //nolint:gosec
+		},
+		entry: func(_ context.Context, req *trillian.GetEntryAndProofRequest) (*trillian.GetEntryAndProofResponse, error) {
+			return &trillian.GetEntryAndProofResponse{
+				Proof: &trillian.Proof{LeafIndex: req.LeafIndex, Hashes: tree.inclusion(uint64(req.LeafIndex), uint64(req.TreeSize))}, //nolint:gosec
+				Leaf:  testIntegratedLeaf(tree, uint64(req.LeafIndex)),                                                                //nolint:gosec
+			}, nil
+		},
+	}
+
+	tc := newManuallyPolledClient(backend, cacheOptions{maxRootAge: time.Hour})
+	defer tc.Close()
+	require.NoError(t, tc.poll())
+
+	// Fast hash and index misses return immediately without waiting for a poll.
+	resp, checked := tc.GetLeafAndProofByHashFast(context.Background(), tree.leafHash(1))
+	require.Equal(t, codes.NotFound, resp.Status)
+	require.EqualValues(t, 1, checked)
+
+	resp, checked = tc.GetLeafAndProofByIndexFast(context.Background(), 1)
+	require.Equal(t, codes.NotFound, resp.Status)
+	require.EqualValues(t, 1, checked)
+
+	// One WaitForRefresh unblocks when the next poll publishes size 2.
+	done := make(chan uint64, 1)
+	errs := make(chan error, 1)
+	go func() {
+		refreshed, err := tc.WaitForRefresh(context.Background())
+		done <- refreshed
+		errs <- err
+	}()
+	// Wait briefly for WaitForRefresh to subscribe to nextPoll.
+	size = 2
+	require.Eventually(t, func() bool {
+		require.NoError(t, tc.poll())
+		select {
+		case err := <-errs:
+			require.NoError(t, err)
+			require.EqualValues(t, 2, <-done)
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+
+	resp, checked = tc.GetLeafAndProofByHashFast(context.Background(), tree.leafHash(1))
+	requireVerifiedRead(t, resp, tree, 1, 2)
+	require.EqualValues(t, 2, checked)
+
+	resp, checked = tc.GetLeafAndProofByIndexFast(context.Background(), 1)
+	requireVerifiedRead(t, resp, tree, 1, 2)
+	require.EqualValues(t, 2, checked)
+}
